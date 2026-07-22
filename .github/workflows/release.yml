@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag name for release (e.g. v1.0.0 or MatriX.LT-002)"
+        required: true
+        default: "manual-build"
+      build_all:
+        description: "🔘 Build ALL platforms (override individual selections)"
+        required: false
+        type: boolean
+        default: false
+      linux_amd64:
+        description: "🐧 Linux AMD64 (x86_64)"
+        required: false
+        type: boolean
+        default: true
+      linux_arm64:
+        description: "🐧 Linux ARM64 (aarch64)"
+        required: false
+        type: boolean
+        default: true
+      linux_arm7:
+        description: "🐧 Linux ARM7 (32-bit ARM)"
+        required: false
+        type: boolean
+        default: false
+      windows:
+        description: "🪟 Windows (AMD64)"
+        required: false
+        type: boolean
+        default: false
+      macos:
+        description: "🍎 macOS (AMD64 + ARM64)"
+        required: false
+        type: boolean
+        default: false
+      android_arm64:
+        description: "🤖 Android ARM64 (aarch64)"
+        required: false
+        type: boolean
+        default: true
+      android_arm7:
+        description: "🤖 Android ARM7 (32-bit)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  cross:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.event.inputs.tag_name || github.ref_name }}
+
+  macos:
+    if: >
+      github.event_name == 'push' ||
+      github.event.inputs.build_all == 'true' ||
+      github.event.inputs.macos == 'true'
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      version: ${{ github.event.inputs.tag_name || github.ref_name }}
+
+  release:
+    needs: [cross, macos]
+    if: always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: TorrServer-LT-*
+          path: ./dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: |
+          echo "========================================="
+          echo "  Release Assets"
+          echo "========================================="
+          ls -lhR ./dist || echo "No dist files"
+          echo "========================================="
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
