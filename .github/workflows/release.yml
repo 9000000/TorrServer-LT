@@ -83,10 +83,10 @@ jobs:
           else
             [[ "${{ github.event.inputs.linux_amd64 }}" == "true" ]] && TARGETS+=("linux-amd64")
             [[ "${{ github.event.inputs.linux_arm64 }}" == "true" ]] && TARGETS+=("linux-arm64")
-            [[ "${{ github.event.inputs.linux_arm7 }}" == "true" ]] && TARGETS+=("linux-arm7")
+            [[ "${{ github.event.inputs.linux_arm7 }}" == "true" ]] && TARGETS+=("linux-armv7")
             [[ "${{ github.event.inputs.windows }}" == "true" ]] && TARGETS+=("windows-amd64")
             [[ "${{ github.event.inputs.android_arm64 }}" == "true" ]] && TARGETS+=("android-arm64")
-            [[ "${{ github.event.inputs.android_arm7 }}" == "true" ]] && TARGETS+=("android-arm7")
+            [[ "${{ github.event.inputs.android_arm7 }}" == "true" ]] && TARGETS+=("android-armv7")
             BUILD_MACOS="${{ github.event.inputs.macos }}"
             GSTREAMER="${{ github.event.inputs.gstreamer }}"
           fi
