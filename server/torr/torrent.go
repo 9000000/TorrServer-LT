@@ -2,8 +2,11 @@ package torr
 
 import (
 	"errors"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -577,6 +580,202 @@ func (t *Torrent) Status() *state.TorrentStatus {
 		st.TorrentSize = lst.TotalSize
 		st.FileStats = nil
 		if files := t.Files(); len(files) > 0 {
+			// Check for Smart Indexing (Movie Mode)
+			// Trigger if Category is explicitly "movie"
+			// OR if the largest file dominates the torrent (> 85% of total size), implying it's the main movie file.
+			if len(files) > 1 {
+				totalSize := int64(0)
+				maxSize := int64(0)
+				maxIndex := -1
+
+				for i, f := range files {
+					totalSize += f.Length
+					if f.Length > maxSize {
+						maxSize = f.Length
+						maxIndex = i
+					}
+				}
+
+				isMovie := st.Category == "movie"
+				if !isMovie && totalSize > 0 {
+					// Heuristic: If largest file is > 85% of total size
+					if float64(maxSize) > float64(totalSize)*0.85 {
+						isMovie = true
+					}
+				}
+
+				if isMovie && maxIndex > 0 {
+					largest := files[maxIndex]
+					// remove from current position
+					files = append(files[:maxIndex], files[maxIndex+1:]...)
+					// prepend
+					files = append([]*File{largest}, files...)
+				}
+			}
+
+			// Smart Indexing (TV Series Mode)
+			// Exclude "anime" to keep default indexing as requested
+			catLower := strings.ToLower(st.Category)
+			if strings.Contains(catLower, "tv") && !strings.Contains(catLower, "anime") {
+				// Full matches
+				reSeasonEp := regexp.MustCompile(`(?i)Season\W*(\d+).*\WEpisode\W*(\d+)`)
+				reSE := regexp.MustCompile(`(?i)\bS(\d+)(?:[^0-9E]+)?E(\d+)\b`)
+				reX := regexp.MustCompile(`(?i)\b(\d+)x(\d+)\b`)
+
+				// Season extractors
+				reSeasonGen := regexp.MustCompile(`(?i)\bS(?:eason)?\W*(\d+)`)
+				reSeasonRU := regexp.MustCompile(`(?i)Сезон\W*(\d+)\b`)
+				reSeasonReverse := regexp.MustCompile(`(?i)(\d+)\W*(?:-[йяе]?\s+)?(?:Сезон|Season)`)
+
+				// Episode extractors
+				reEpGen := regexp.MustCompile(`(?i)\bE(?:p|pisode)?\W*(\d+)\b`)
+				reEpLeading := regexp.MustCompile(`^\s*(\d+)`)
+
+				extractSeason := func(s string) int {
+					if m := reSeasonGen.FindStringSubmatch(s); len(m) == 2 {
+						n, _ := strconv.Atoi(m[1])
+						return n
+					}
+					if m := reSeasonReverse.FindStringSubmatch(s); len(m) == 2 {
+						n, _ := strconv.Atoi(m[1])
+						return n
+					}
+					if m := reSeasonRU.FindStringSubmatch(s); len(m) == 2 {
+						n, _ := strconv.Atoi(m[1])
+						return n
+					}
+					return 0
+				}
+
+				extractEpisode := func(s string) int {
+					if m := reEpGen.FindStringSubmatch(s); len(m) == 2 {
+						n, _ := strconv.Atoi(m[1])
+						return n
+					}
+					if m := reEpLeading.FindStringSubmatch(s); len(m) == 2 {
+						n, _ := strconv.Atoi(m[1])
+						return n
+					}
+					return 0
+				}
+
+				parseID := func(inputStr string) int {
+					// 1. Try Full Path Pattern
+					matches := reSeasonEp.FindStringSubmatch(inputStr)
+					if len(matches) == 3 {
+						season, _ := strconv.Atoi(matches[1])
+						episode, _ := strconv.Atoi(matches[2])
+						if season > 0 && episode > 0 {
+							return season*100 + episode
+						}
+					}
+
+					matches = reSE.FindStringSubmatch(inputStr)
+					if len(matches) == 3 {
+						season, _ := strconv.Atoi(matches[1])
+						episode, _ := strconv.Atoi(matches[2])
+						if season > 0 && episode > 0 {
+							return season*100 + episode
+						}
+					}
+
+					matches = reX.FindStringSubmatch(inputStr)
+					if len(matches) == 3 {
+						season, _ := strconv.Atoi(matches[1])
+						episode, _ := strconv.Atoi(matches[2])
+						if season > 0 && episode > 0 {
+							return season*100 + episode
+						}
+					}
+
+					// 2. Split Component-based Strategy
+					dir := filepath.Dir(inputStr)
+					base := filepath.Base(inputStr)
+
+					ep := extractEpisode(base)
+					if ep > 0 {
+						season := extractSeason(dir)
+						if season == 0 {
+							season = extractSeason(st.Category)
+						}
+						if season == 0 {
+							season = extractSeason(t.Title)
+						}
+						if season > 0 {
+							return season*100 + ep
+						}
+					}
+
+					return 0
+				}
+
+				// Single File
+				if len(files) == 1 {
+					f := files[0]
+					id := parseID(f.Path)
+					if id == 0 {
+						id = parseID(t.Title)
+					}
+					if id == 0 {
+						id = parseID(st.Category)
+					}
+
+					if id > 0 {
+						st.FileStats = append(st.FileStats, &state.TorrentFileStat{
+							Id:     id,
+							Path:   f.Path,
+							Length: f.Length,
+						})
+						goto FinishStatus
+					}
+				} else {
+					// Multiple Files
+					customIDs := make(map[int]*File)
+					usedIndices := make(map[int]bool)
+
+					for i, f := range files {
+						id := parseID(f.Path)
+						if id > 0 {
+							customIDs[id] = f
+							usedIndices[i] = true
+						}
+					}
+
+					if len(customIDs) > 0 {
+						st.FileStats = make([]*state.TorrentFileStat, 0, len(files))
+
+						var sortedIDs []int
+						for id := range customIDs {
+							sortedIDs = append(sortedIDs, id)
+						}
+						sort.Ints(sortedIDs)
+
+						for _, id := range sortedIDs {
+							f := customIDs[id]
+							st.FileStats = append(st.FileStats, &state.TorrentFileStat{
+								Id:     id,
+								Path:   f.Path,
+								Length: f.Length,
+							})
+						}
+
+						defaultID := 10000
+						for i, f := range files {
+							if !usedIndices[i] {
+								st.FileStats = append(st.FileStats, &state.TorrentFileStat{
+									Id:     defaultID,
+									Path:   f.Path,
+									Length: f.Length,
+								})
+								defaultID++
+							}
+						}
+						goto FinishStatus
+					}
+				}
+			}
+
+			// Default Logic
 			for _, f := range files {
 				st.FileStats = append(st.FileStats, &state.TorrentFileStat{
 					Id:     f.Index + 1, // legacy: 0 means undefined in the web UI
@@ -584,6 +783,8 @@ func (t *Torrent) Status() *state.TorrentStatus {
 					Length: f.Length,
 				})
 			}
+
+		FinishStatus:
 			th := torrshash.New(st.Hash)
 			th.AddField(torrshash.TagTitle, st.Title)
 			th.AddField(torrshash.TagPoster, st.Poster)

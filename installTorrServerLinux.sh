@@ -46,8 +46,8 @@ isAuthUser=""
 isAuthPass=""
 
 # Constants
-readonly REPO_URL="https://github.com/trinity-aml/TorrServer-LT"
-readonly REPO_API_URL="https://api.github.com/repos/trinity-aml/TorrServer-LT"
+readonly REPO_URL="https://github.com/9000000/TorrServer-LT"
+readonly REPO_API_URL="https://api.github.com/repos/9000000/TorrServer-LT"
 readonly VERSION_PREFIX="MatriX.LT"
 readonly BINARY_NAME_PREFIX="TorrServer-LT-linux"
 # All TorrServer-LT builds link libtorrent (C++) against the build host's

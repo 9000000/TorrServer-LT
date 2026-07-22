@@ -73,8 +73,8 @@ export default function AboutDialog() {
               <span>{t('Links')}</span>
 
               <div>
-                <LinkComponent name={t('ProjectSource')} link='https://github.com/trinity-aml/TorrServer-LT' />
-                <LinkComponent name={t('Releases')} link='https://github.com/trinity-aml/TorrServer-LT/releases' />
+                <LinkComponent name={t('ProjectSource')} link='https://github.com/9000000/TorrServer-LT' />
+                <LinkComponent name={t('Releases')} link='https://github.com/9000000/TorrServer-LT/releases' />
                 <LinkComponent name={t('ApiDocs')} link='swagger/index.html' />
               </div>
             </Section>

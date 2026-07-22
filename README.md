@@ -40,7 +40,7 @@ The difference from upstream is the underlying torrent engine: `arvidn/libtorren
 
 ### Installation
 
-Download the application for the required platform in the [releases](https://github.com/trinity-aml/TorrServer-LT/releases) page. After installation, open the link <http://127.0.0.1:8090> in the browser.
+Download the application for the required platform in the [releases](https://github.com/9000000/TorrServer-LT/releases) page. After installation, open the link <http://127.0.0.1:8090> in the browser.
 
 Every release ships two flavours per desktop platform:
 
@@ -62,7 +62,7 @@ Run `TorrServer-LT-windows-amd64.exe` (or `TorrServer-LT-windows-amd64-gst.exe` 
 Run in console
 
 ```bash
-curl -s https://raw.githubusercontent.com/trinity-aml/TorrServer-LT/master/installTorrServerLinux.sh | sudo bash
+curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTorrServerLinux.sh | sudo bash
 ```
 
 The script supports interactive and non-interactive installation, configuration, updates, and removal. When running the script interactively, you can:
@@ -74,7 +74,7 @@ The script supports interactive and non-interactive installation, configuration,
 **Download first and set execute permissions:**
 
 ```bash
-curl -s https://raw.githubusercontent.com/trinity-aml/TorrServer-LT/master/installTorrServerLinux.sh -o installTorrServerLinux.sh && chmod 755 installTorrServerLinux.sh
+curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTorrServerLinux.sh -o installTorrServerLinux.sh && chmod 755 installTorrServerLinux.sh
 ```
 
 **Command-line examples:**
@@ -147,7 +147,7 @@ curl -s https://raw.githubusercontent.com/trinity-aml/TorrServer-LT/master/insta
 Run in Terminal.app
 
 ```bash
-curl -s https://raw.githubusercontent.com/trinity-aml/TorrServer-LT/master/installTorrServerMac.sh -o installTorrserverMac.sh && chmod 755 installTorrServerMac.sh && bash ./installTorrServerMac.sh
+curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTorrServerMac.sh -o installTorrserverMac.sh && chmod 755 installTorrServerMac.sh && bash ./installTorrServerMac.sh
 ```
 
 Alternative install script for Intel Macs: <https://github.com/dancheskus/TorrServerMacInstaller>
@@ -202,13 +202,13 @@ TorrServer-darwin-arm64 [--port PORT] [--ip IP ...] [--path PATH] [--logpath LOG
 Run in console
 
 ```bash
-docker run --rm -d --name torrserver -p 8090:8090 ghcr.io/trinity-aml/torrserver-lt:latest
+docker run --rm -d --name torrserver -p 8090:8090 ghcr.io/9000000/torrserver-lt:latest
 ```
 
 For running in persistence mode, just mount volume to container by adding `-v ~/ts:/opt/ts`, where `~/ts` folder path is just example, but you could use it anyway... Result example command:
 
 ```bash
-docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/trinity-aml/torrserver-lt:latest
+docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/9000000/torrserver-lt:latest
 ```
 
 #### Environments
@@ -226,7 +226,7 @@ docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/trinit
 Example with full overrided command (on default values):
 
 ```bash
-docker run --rm -d -e TS_PORT=5665 -e TS_DONTKILL=1 -e TS_HTTPAUTH=1 -e TS_RDB=1 -e TS_CONF_PATH=/opt/ts/config -e TS_LOG_PATH=/opt/ts/log -e TS_TORR_DIR=/opt/ts/torrents -e TS_PROXYURL=socks5h://user:password@example.com:2080 -e TS_PROXYMODE=tracker --name torrserver -v ~/ts:/opt/ts -p 5665:5665 ghcr.io/trinity-aml/torrserver-lt:latest
+docker run --rm -d -e TS_PORT=5665 -e TS_DONTKILL=1 -e TS_HTTPAUTH=1 -e TS_RDB=1 -e TS_CONF_PATH=/opt/ts/config -e TS_LOG_PATH=/opt/ts/log -e TS_TORR_DIR=/opt/ts/torrents -e TS_PROXYURL=socks5h://user:password@example.com:2080 -e TS_PROXYMODE=tracker --name torrserver -v ~/ts:/opt/ts -p 5665:5665 ghcr.io/9000000/torrserver-lt:latest
 ```
 
 #### Docker Compose
@@ -237,7 +237,7 @@ docker run --rm -d -e TS_PORT=5665 -e TS_DONTKILL=1 -e TS_HTTPAUTH=1 -e TS_RDB=1
 version: '3.3'
 services:
     torrserver:
-        image: ghcr.io/trinity-aml/torrserver-lt
+        image: ghcr.io/9000000/torrserver-lt
         container_name: torrserver
         network_mode: host    # to allow DLNA feature
         environment:
@@ -519,7 +519,7 @@ The **only** way to enable GStreamer in TorrServer-LT is to run a build compiled
 | `TorrServer-LT-<platform>-gst` | **Yes** — `/gst/*` routes and transcoding |
 | `TorrServer-LT-<platform>` (standard) | **No** — `GET /gst/settings` returns `built_in: false`; no other `/gst/*` routes are registered and pipelines do not run |
 
-Download `TorrServer-LT-*-gst` from [releases](https://github.com/trinity-aml/TorrServer-LT/releases) (Windows amd64 / Linux amd64+arm64 / macOS amd64+arm64), let the install scripts do it (`--gst`, see [Installation](#installation)), or build it yourself — the `build/*.sh` scripts produce both variants automatically, and for a manual build it is just the tag on top of the usual cgo environment:
+Download `TorrServer-LT-*-gst` from [releases](https://github.com/9000000/TorrServer-LT/releases) (Windows amd64 / Linux amd64+arm64 / macOS amd64+arm64), let the install scripts do it (`--gst`, see [Installation](#installation)), or build it yourself — the `build/*.sh` scripts produce both variants automatically, and for a manual build it is just the tag on top of the usual cgo environment:
 
 ```bash
 cd server
