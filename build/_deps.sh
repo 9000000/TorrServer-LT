@@ -115,6 +115,7 @@ build_libtorrent() {
 # pure Go (purego dlopen at runtime, no build-time linkage), so the variant
 # differs only by the build tag; other targets ship the stub-only base binary.
 gst_variant_wanted() {
+    [ "${SKIP_GST:-0}" = "1" ] && return 1
     case "$GOOS/$GOARCH" in
         linux/amd64 | linux/arm64 | windows/amd64 | darwin/amd64 | darwin/arm64) return 0 ;;
         *) return 1 ;;

@@ -38,6 +38,9 @@ on:
       android_arm7:
         type: boolean
         default: true
+      gstreamer:
+        type: boolean
+        default: true
 
 jobs:
   # Fetch Boost + libtorrent once and cache _src, so the matrix below doesn't
@@ -126,6 +129,7 @@ jobs:
           # Empty for branch/PR builds (scripts default to MatriX.142.LT-1.0.0);
           # set to the tag when called from ts_release.yml.
           TS_VERSION: ${{ inputs.version }}
+          SKIP_GST: ${{ (inputs.build_all == false && inputs.gstreamer == false) && '1' || '0' }}
         run: bash build/${{ matrix.target }}.sh
 
       # Only linux-amd64 runs on the x86 host; use it as the test + smoke gate.

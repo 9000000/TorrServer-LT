@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: true
+      gstreamer:
+        description: "🎥 GStreamer binaries (-gst-)"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -60,6 +65,14 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ github.event.inputs.tag_name || github.ref_name }}
+      build_all: ${{ github.event.inputs.build_all == true }}
+      linux_amd64: ${{ github.event.inputs.build_all == true || github.event.inputs.linux_amd64 == true || github.event_name == 'push' }}
+      linux_arm64: ${{ github.event.inputs.build_all == true || github.event.inputs.linux_arm64 == true || github.event_name == 'push' }}
+      linux_arm7: ${{ github.event.inputs.build_all == true || github.event.inputs.linux_arm7 == true || github.event_name == 'push' }}
+      windows: ${{ github.event.inputs.build_all == true || github.event.inputs.windows == true || github.event_name == 'push' }}
+      android_arm64: ${{ github.event.inputs.build_all == true || github.event.inputs.android_arm64 == true || github.event_name == 'push' }}
+      android_arm7: ${{ github.event.inputs.build_all == true || github.event.inputs.android_arm7 == true || github.event_name == 'push' }}
+      gstreamer: ${{ github.event.inputs.build_all == true || github.event.inputs.gstreamer == true || github.event_name == 'push' }}
 
   macos:
     if: >
