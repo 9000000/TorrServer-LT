@@ -61,30 +61,60 @@ permissions:
   packages: write
 
 jobs:
+  matrix-prep:
+    name: Prepare Dynamic Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.set-targets.outputs.targets }}
+      build_macos: ${{ steps.set-targets.outputs.build_macos }}
+      gstreamer: ${{ steps.set-targets.outputs.gstreamer }}
+    steps:
+      - id: set-targets
+        run: |
+          EVENT="${{ github.event_name }}"
+          BUILD_ALL="${{ github.event.inputs.build_all }}"
+          
+          TARGETS=()
+          
+          if [[ "$EVENT" == "push" ]] || [[ "$BUILD_ALL" == "true" ]]; then
+            TARGETS+=("linux-amd64" "linux-arm64" "linux-armv7" "windows-amd64" "android-arm64" "android-armv7")
+            BUILD_MACOS="true"
+            GSTREAMER="true"
+          else
+            [[ "${{ github.event.inputs.linux_amd64 }}" == "true" ]] && TARGETS+=("linux-amd64")
+            [[ "${{ github.event.inputs.linux_arm64 }}" == "true" ]] && TARGETS+=("linux-arm64")
+            [[ "${{ github.event.inputs.linux_arm7 }}" == "true" ]] && TARGETS+=("linux-arm7")
+            [[ "${{ github.event.inputs.windows }}" == "true" ]] && TARGETS+=("windows-amd64")
+            [[ "${{ github.event.inputs.android_arm64 }}" == "true" ]] && TARGETS+=("android-arm64")
+            [[ "${{ github.event.inputs.android_arm7 }}" == "true" ]] && TARGETS+=("android-arm7")
+            BUILD_MACOS="${{ github.event.inputs.macos }}"
+            GSTREAMER="${{ github.event.inputs.gstreamer }}"
+          fi
+
+          JSON_TARGETS=$(jq -c -n '$ARGS.positional' --args "${TARGETS[@]}")
+          echo "targets=$JSON_TARGETS" >> "$GITHUB_OUTPUT"
+          echo "build_macos=$BUILD_MACOS" >> "$GITHUB_OUTPUT"
+          echo "gstreamer=$GSTREAMER" >> "$GITHUB_OUTPUT"
+          echo "Dynamic targets: $JSON_TARGETS"
+
   cross:
+    needs: matrix-prep
+    if: needs.matrix-prep.outputs.targets != '[]'
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ github.event.inputs.tag_name || github.ref_name }}
-      build_all: ${{ github.event.inputs.build_all == true }}
-      linux_amd64: ${{ github.event.inputs.build_all == true || github.event.inputs.linux_amd64 == true || github.event_name == 'push' }}
-      linux_arm64: ${{ github.event.inputs.build_all == true || github.event.inputs.linux_arm64 == true || github.event_name == 'push' }}
-      linux_arm7: ${{ github.event.inputs.build_all == true || github.event.inputs.linux_arm7 == true || github.event_name == 'push' }}
-      windows: ${{ github.event.inputs.build_all == true || github.event.inputs.windows == true || github.event_name == 'push' }}
-      android_arm64: ${{ github.event.inputs.build_all == true || github.event.inputs.android_arm64 == true || github.event_name == 'push' }}
-      android_arm7: ${{ github.event.inputs.build_all == true || github.event.inputs.android_arm7 == true || github.event_name == 'push' }}
-      gstreamer: ${{ github.event.inputs.build_all == true || github.event.inputs.gstreamer == true || github.event_name == 'push' }}
+      targets_json: ${{ needs.matrix-prep.outputs.targets }}
+      gstreamer: ${{ needs.matrix-prep.outputs.gstreamer == 'true' }}
 
   macos:
-    if: >
-      github.event_name == 'push' ||
-      github.event.inputs.build_all == 'true' ||
-      github.event.inputs.macos == 'true'
+    needs: matrix-prep
+    if: needs.matrix-prep.outputs.build_macos == 'true'
     uses: ./.github/workflows/build-macos.yml
     with:
       version: ${{ github.event.inputs.tag_name || github.ref_name }}
 
   release:
-    needs: [cross, macos]
+    needs: [matrix-prep, cross, macos]
     if: always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:

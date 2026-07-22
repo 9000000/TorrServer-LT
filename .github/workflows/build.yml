@@ -5,46 +5,22 @@ name: build
 # macOS is built natively on macos runners in build-macos.yml.
 
 on:
-  # No `push` trigger: the full cross-compile does NOT run on every push to
-  # master. Build manually (workflow_dispatch) or via a release tag, which
-  # reuses this workflow through ts_release.yml's workflow_call.
   pull_request:
     branches: [master]
   workflow_dispatch:
-  # Reused by ts_release.yml on a tag; `version` stamps the binaries.
   workflow_call:
     inputs:
       version:
         type: string
         default: ''
-      build_all:
-        type: boolean
-        default: true
-      linux_amd64:
-        type: boolean
-        default: true
-      linux_arm64:
-        type: boolean
-        default: true
-      linux_arm7:
-        type: boolean
-        default: true
-      windows:
-        type: boolean
-        default: true
-      android_arm64:
-        type: boolean
-        default: true
-      android_arm7:
-        type: boolean
-        default: true
+      targets_json:
+        type: string
+        default: '["linux-amd64","linux-arm64","linux-armv7","windows-amd64","android-arm64","android-armv7"]'
       gstreamer:
         type: boolean
         default: true
 
 jobs:
-  # Fetch Boost + libtorrent once and cache _src, so the matrix below doesn't
-  # download Boost (~120 MB) and clone libtorrent six times in parallel.
   sources:
     runs-on: ubuntu-latest
     steps:
@@ -66,13 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - linux-amd64
-          - linux-arm64
-          - linux-armv7
-          - windows-amd64
-          - android-arm64
-          - android-armv7
+        target: ${{ fromJson(inputs.targets_json) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -82,8 +52,6 @@ jobs:
           path: _src
           key: src-boost1.85.0-lt2.0.13-v1
 
-      # Cache the per-target install tree (lib + headers + .pc). With it present
-      # build_libtorrent short-circuits and only the Go binary is relinked.
       - name: Cache libtorrent install tree
         uses: actions/cache@v4
         with:
@@ -98,14 +66,6 @@ jobs:
           cache-dependency-path: server/go.sum
 
       - name: Install toolchain
-        if: >
-          inputs.build_all ||
-          (matrix.target == 'linux-amd64' && inputs.linux_amd64 != false) ||
-          (matrix.target == 'linux-arm64' && inputs.linux_arm64 != false) ||
-          (matrix.target == 'linux-armv7' && inputs.linux_arm7 != false) ||
-          (matrix.target == 'windows-amd64' && inputs.windows != false) ||
-          (matrix.target == 'android-arm64' && inputs.android_arm64 != false) ||
-          (matrix.target == 'android-armv7' && inputs.android_arm7 != false)
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
@@ -117,24 +77,14 @@ jobs:
           esac
 
       - name: Build
-        if: >
-          inputs.build_all ||
-          (matrix.target == 'linux-amd64' && inputs.linux_amd64 != false) ||
-          (matrix.target == 'linux-arm64' && inputs.linux_arm64 != false) ||
-          (matrix.target == 'linux-armv7' && inputs.linux_arm7 != false) ||
-          (matrix.target == 'windows-amd64' && inputs.windows != false) ||
-          (matrix.target == 'android-arm64' && inputs.android_arm64 != false) ||
-          (matrix.target == 'android-armv7' && inputs.android_arm7 != false)
         env:
-          # Empty for branch/PR builds (scripts default to MatriX.142.LT-1.0.0);
-          # set to the tag when called from ts_release.yml.
           TS_VERSION: ${{ inputs.version }}
-          SKIP_GST: ${{ (inputs.build_all == false && inputs.gstreamer == false) && '1' || '0' }}
+          SKIP_GST: ${{ inputs.gstreamer == false && '1' || '0' }}
         run: bash build/${{ matrix.target }}.sh
 
       # Only linux-amd64 runs on the x86 host; use it as the test + smoke gate.
       - name: Unit tests
-        if: matrix.target == 'linux-amd64' && (inputs.build_all || inputs.linux_amd64 != false)
+        if: matrix.target == 'linux-amd64'
         working-directory: server
         env:
           CGO_ENABLED: '1'
@@ -144,30 +94,17 @@ jobs:
         run: go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
 
       - name: Probe --version
-        if: matrix.target == 'linux-amd64' && (inputs.build_all || inputs.linux_amd64 != false)
+        if: matrix.target == 'linux-amd64'
         run: |
           _out/TorrServer-LT-linux-amd64 --version
-          _out/TorrServer-LT-linux-amd64-gst --version
+          _out/TorrServer-LT-linux-amd64-gst --version 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
-        if: >
-          inputs.build_all ||
-          (matrix.target == 'linux-amd64' && inputs.linux_amd64 != false) ||
-          (matrix.target == 'linux-arm64' && inputs.linux_arm64 != false) ||
-          (matrix.target == 'linux-armv7' && inputs.linux_arm7 != false) ||
-          (matrix.target == 'windows-amd64' && inputs.windows != false) ||
-          (matrix.target == 'android-arm64' && inputs.android_arm64 != false) ||
-          (matrix.target == 'android-armv7' && inputs.android_arm7 != false)
         with:
           name: TorrServer-LT-${{ matrix.target }}
           path: _out/TorrServer-LT-${{ matrix.target }}*
           if-no-files-found: ignore
 
-  # Assemble + push the multi-arch GHCR image straight from the linux binaries
-  # the matrix just cross-built — no recompile and no QEMU for the binary (only
-  # the base image's apt runs emulated, per arch). Publishes on master pushes and
-  # on release tags (when this workflow is reused by ts_release.yml); never on
-  # pull requests. See Dockerfile.runtime.
   docker:
     needs: cross
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
@@ -178,54 +115,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download linux binaries
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          pattern: TorrServer-LT-linux-*
-          path: _artifacts
+          pattern: TorrServer-LT-*
+          path: dist
           merge-multiple: true
 
-      # Name each binary `torrserver` under dist/<arch>, where <arch> is exactly
-      # buildx's $TARGETARCH$TARGETVARIANT (amd64 / arm64 / armv7), and set +x
-      # (the artifact zip drops the executable bit).
-      - name: Lay binaries out per Docker arch
-        run: |
-          set -euo pipefail
-          install -D -m755 _artifacts/TorrServer-LT-linux-amd64 dist/amd64/torrserver
-          install -D -m755 _artifacts/TorrServer-LT-linux-arm64 dist/arm64/torrserver
-          install -D -m755 _artifacts/TorrServer-LT-linux-armv7 dist/armv7/torrserver
-
-      - name: Set up QEMU            # only to run the base image's apt per arch
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Lower-case image repo
-        run: echo "REG_REPO=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-
-      - name: Docker metadata (tags + labels)
+      - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ env.REG_REPO }}
+          images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=master,enable=${{ github.ref == 'refs/heads/master' }}
+            type=ref,event=branch
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=semver,pattern={{version}}
+            type=sha,prefix=
 
-      - name: Build and push multi-arch image
+      - name: Build and push runtime image
         uses: docker/build-push-action@v6
-        env:
-          # Don't upload the `<repo>.dockerbuild` build-record artifact — it shows
-          # up in the release job's artifact set and breaks its download.
-          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           file: Dockerfile.runtime
