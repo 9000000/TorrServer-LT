@@ -17,6 +17,27 @@ on:
       version:
         type: string
         default: ''
+      build_all:
+        type: boolean
+        default: true
+      linux_amd64:
+        type: boolean
+        default: true
+      linux_arm64:
+        type: boolean
+        default: true
+      linux_arm7:
+        type: boolean
+        default: true
+      windows:
+        type: boolean
+        default: true
+      android_arm64:
+        type: boolean
+        default: true
+      android_arm7:
+        type: boolean
+        default: true
 
 jobs:
   # Fetch Boost + libtorrent once and cache _src, so the matrix below doesn't
@@ -74,6 +95,14 @@ jobs:
           cache-dependency-path: server/go.sum
 
       - name: Install toolchain
+        if: >
+          inputs.build_all ||
+          (matrix.target == 'linux-amd64' && inputs.linux_amd64 != false) ||
+          (matrix.target == 'linux-arm64' && inputs.linux_arm64 != false) ||
+          (matrix.target == 'linux-armv7' && inputs.linux_arm7 != false) ||
+          (matrix.target == 'windows-amd64' && inputs.windows != false) ||
+          (matrix.target == 'android-arm64' && inputs.android_arm64 != false) ||
+          (matrix.target == 'android-armv7' && inputs.android_arm7 != false)
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
@@ -85,6 +114,14 @@ jobs:
           esac
 
       - name: Build
+        if: >
+          inputs.build_all ||
+          (matrix.target == 'linux-amd64' && inputs.linux_amd64 != false) ||
+          (matrix.target == 'linux-arm64' && inputs.linux_arm64 != false) ||
+          (matrix.target == 'linux-armv7' && inputs.linux_arm7 != false) ||
+          (matrix.target == 'windows-amd64' && inputs.windows != false) ||
+          (matrix.target == 'android-arm64' && inputs.android_arm64 != false) ||
+          (matrix.target == 'android-armv7' && inputs.android_arm7 != false)
         env:
           # Empty for branch/PR builds (scripts default to MatriX.142.LT-1.0.0);
           # set to the tag when called from ts_release.yml.
@@ -93,7 +130,7 @@ jobs:
 
       # Only linux-amd64 runs on the x86 host; use it as the test + smoke gate.
       - name: Unit tests
-        if: matrix.target == 'linux-amd64'
+        if: matrix.target == 'linux-amd64' && (inputs.build_all || inputs.linux_amd64 != false)
         working-directory: server
         env:
           CGO_ENABLED: '1'
@@ -103,16 +140,24 @@ jobs:
         run: go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
 
       - name: Probe --version
-        if: matrix.target == 'linux-amd64'
+        if: matrix.target == 'linux-amd64' && (inputs.build_all || inputs.linux_amd64 != false)
         run: |
           _out/TorrServer-LT-linux-amd64 --version
           _out/TorrServer-LT-linux-amd64-gst --version
 
       - uses: actions/upload-artifact@v4
+        if: >
+          inputs.build_all ||
+          (matrix.target == 'linux-amd64' && inputs.linux_amd64 != false) ||
+          (matrix.target == 'linux-arm64' && inputs.linux_arm64 != false) ||
+          (matrix.target == 'linux-armv7' && inputs.linux_arm7 != false) ||
+          (matrix.target == 'windows-amd64' && inputs.windows != false) ||
+          (matrix.target == 'android-arm64' && inputs.android_arm64 != false) ||
+          (matrix.target == 'android-armv7' && inputs.android_arm7 != false)
         with:
           name: TorrServer-LT-${{ matrix.target }}
           path: _out/TorrServer-LT-${{ matrix.target }}*
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   # Assemble + push the multi-arch GHCR image straight from the linux binaries
   # the matrix just cross-built — no recompile and no QEMU for the binary (only
