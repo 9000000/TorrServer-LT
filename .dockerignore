@@ -2,3 +2,11 @@ web/node_modules
 web/build
 web/dist
 web/.env_example
+.git
+.github
+build
+upx
+log.txt
+web/node_modules
+web/build
+web/dist

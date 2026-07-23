@@ -188,6 +188,7 @@ func run(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
+	cmd.Env = append(os.Environ(), "NODE_OPTIONS=--openssl-legacy-provider")
 	return cmd.Run()
 }
 
