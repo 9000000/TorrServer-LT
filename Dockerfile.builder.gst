@@ -61,7 +61,7 @@ COPY . .
 
 WORKDIR /src/server
 
-ARG TS_VERSION=MatriX.142.LT-1.1.3
+ARG TS_VERSION=MatriX.142.LT-114.1
 
 ENV CGO_ENABLED=1
 
@@ -69,7 +69,7 @@ RUN go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna
 
 RUN go build \
       -tags 'osusergo netgo gst' \
-      -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
+      -ldflags "-s -w -X server/version.Version=${TS_VERSION}" \
       -o /out/TorrServer-LT \
       ./cmd
 
