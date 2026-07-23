@@ -9,7 +9,13 @@ case $(uname -m) in
     *) echo "Unsupported Arch. Can't continue."; exit 1 ;;
 esac
 
-binName="TorrServer-LT-linux-${architecture}"
+USE_GST="${TS_GST:-$USE_GST}"
+if [ "$USE_GST" = "1" ] || [ "$USE_GST" = "true" ]; then
+    echo "GStreamer variant enabled (TS_GST=1)."
+    binName="TorrServer-LT-linux-${architecture}-gst"
+else
+    binName="TorrServer-LT-linux-${architecture}"
+fi
 
 mkdir -p /opt/torrserver
 cd /opt/torrserver

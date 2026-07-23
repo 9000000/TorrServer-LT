@@ -1,16 +1,12 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 #
-# TorrServer-LT builder: produces a fully-static linux binary with libtorrent
-# (arvidn) linked into the Go binary via cgo.
+# TorrServer-LT static builder WITH GStreamer support (~60 MB final image size).
 #
-# Stages:
-#   lt-build  — compiles libtorrent-rasterbar 2.x as a static archive
-#   go-build  — compiles the Go binary with cgo, statically linking libtorrent
-#               and all C/C++ deps (boost, openssl, zlib, libstdc++, musl)
-#   final     — minimal scratch image with just the binary
+# Multi-stage build:
+#   lt-build  — compiles libtorrent-rasterbar statically against boost/openssl/zlib
+#   go-build  — links TorrServer statically with libtorrent and GStreamer (-tags 'osusergo netgo gst')
+#   final     — minimal Alpine image with GStreamer runtime libraries
 #
-# Stage 1 milestone: only proves the toolchain works end-to-end (lt.Version()).
-# Real wiring of session/torrent/storage lands in later milestones.
 
 ARG LT_TAG=v2.0.13
 ARG GO_VERSION=1.25
@@ -46,7 +42,7 @@ RUN cmake .. \
  && cmake --install .
 
 ############################
-# Stage 2: build TorrServer-LT
+# Stage 2: build TorrServer-LT with GStreamer tag
 ############################
 FROM golang:${GO_VERSION}-alpine AS go-build
 
@@ -65,34 +61,40 @@ COPY . .
 
 WORKDIR /src/server
 
-ARG TS_VERSION=MatriX.141.LT-001
+ARG TS_VERSION=MatriX.142.LT-1.1.3
 
-# CGO_ENABLED=1 + fully-static via -extldflags '-static'.
-# pkg-config in lt.go resolves CXXFLAGS/LDFLAGS for libtorrent-rasterbar.
 ENV CGO_ENABLED=1
 
-# Gate the static binary build on the lt + torrstor test suites so a
-# broken shim or piece-cache never ships. libtorrent is static
-# (.a only under /opt/lt/lib) so the test binaries are fully
-# self-contained.
 RUN go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
 
 RUN go build \
-      -tags 'osusergo netgo' \
+      -tags 'osusergo netgo gst' \
       -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
       -o /out/TorrServer-LT \
       ./cmd
 
 ############################
-# Stage 3: final
+# Stage 3: final image (~60MB with GStreamer)
 ############################
 FROM alpine:${ALPINE_VERSION} AS final
+
+LABEL maintainer="9000000"
+LABEL description="TorrServer-LT ultra-lightweight image with GStreamer HLS transcoding"
 
 ENV TS_CONF_PATH="/opt/ts/config" \
     TS_LOG_PATH="/opt/ts/log" \
     TS_TORR_DIR="/opt/ts/torrents" \
     TS_PORT=8090 \
     GODEBUG=madvdontneed=1
+
+# Install minimal GStreamer runtime libraries
+RUN apk add --no-cache \
+        ca-certificates \
+        libstdc++ \
+        gstreamer \
+        gstreamer-tools \
+        gst-plugins-base \
+        gst-plugins-good
 
 COPY --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
 RUN ln -s /usr/local/bin/TorrServer-LT /usr/local/bin/torrserver

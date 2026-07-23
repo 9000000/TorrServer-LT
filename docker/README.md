@@ -17,6 +17,7 @@ docker run -d \
   -p 8090:8090 \
   -p 32000:32000 \
   -e TS_PORT=8090 \
+  -e TS_GST=1 \
   -e TS_PATH="/opt/torrserver/config" \
   -e TS_TORRENTSDIR="/opt/torrserver/torrents" \
   -v ./config:/opt/torrserver/config \
