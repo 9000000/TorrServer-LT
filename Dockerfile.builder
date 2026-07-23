@@ -7,14 +7,14 @@
 #   lt-build  — compiles libtorrent-rasterbar 2.x as a static archive
 #   go-build  — compiles the Go binary with cgo, statically linking libtorrent
 #               and all C/C++ deps (boost, openssl, zlib, libstdc++, musl)
-#   final     — minimal scratch image with just the binary
+#   final     — minimal Alpine image with just the static binary
 #
 # Stage 1 milestone: only proves the toolchain works end-to-end (lt.Version()).
 # Real wiring of session/torrent/storage lands in later milestones.
 
 ARG LT_TAG=v2.0.13
-ARG GO_VERSION=1.25
-ARG ALPINE_VERSION=3.20
+ARG GO_VERSION=1.26
+ARG ALPINE_VERSION=3.24.1
 
 ############################
 # Stage 1: build libtorrent
@@ -22,7 +22,8 @@ ARG ALPINE_VERSION=3.20
 FROM alpine:${ALPINE_VERSION} AS lt-build
 ARG LT_TAG
 
-RUN apk add --no-cache \
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add --no-cache \
         build-base cmake git linux-headers \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
@@ -50,7 +51,8 @@ RUN cmake .. \
 ############################
 FROM golang:${GO_VERSION}-alpine AS go-build
 
-RUN apk add --no-cache \
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add --no-cache \
         build-base musl-dev pkgconfig git \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
@@ -61,11 +63,15 @@ COPY --from=lt-build /opt/lt /opt/lt
 ENV PKG_CONFIG_PATH=/opt/lt/lib/pkgconfig
 
 WORKDIR /src
+COPY server/go.mod server/go.sum ./server/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    cd server && go mod download
+
 COPY . .
 
 WORKDIR /src/server
 
-ARG TS_VERSION=MatriX.141.LT-001
+ARG TS_VERSION=MatriX.142.LT-114.1
 
 # CGO_ENABLED=1 + fully-static via -extldflags '-static'.
 # pkg-config in lt.go resolves CXXFLAGS/LDFLAGS for libtorrent-rasterbar.
@@ -75,9 +81,13 @@ ENV CGO_ENABLED=1
 # broken shim or piece-cache never ships. libtorrent is static
 # (.a only under /opt/lt/lib) so the test binaries are fully
 # self-contained.
-RUN go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
 
-RUN go build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build \
       -tags 'osusergo netgo' \
       -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
       -o /out/TorrServer-LT \
@@ -88,11 +98,17 @@ RUN go build \
 ############################
 FROM alpine:${ALPINE_VERSION} AS final
 
+LABEL maintainer="9000000"
+LABEL description="TorrServer-LT fully static lightweight image"
+
 ENV TS_CONF_PATH="/opt/ts/config" \
     TS_LOG_PATH="/opt/ts/log" \
     TS_TORR_DIR="/opt/ts/torrents" \
     TS_PORT=8090 \
     GODEBUG=madvdontneed=1
+
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add --no-cache ca-certificates tzdata
 
 COPY --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
 RUN ln -s /usr/local/bin/TorrServer-LT /usr/local/bin/torrserver

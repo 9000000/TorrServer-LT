@@ -1,6 +1,6 @@
 module server
 
-go 1.25.7
+go 1.26
 
 require (
 	github.com/agnivade/levenshtein v1.2.1

@@ -2,15 +2,11 @@ FROM debian:trixie-slim
 
 LABEL maintainer="9000000"
 
-# Install essential runtime & minimal GStreamer base (trimmed size)
+# Install minimal runtime dependencies without GStreamer (glibc 2.38+ & C++ libstdc++)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     libstdc++6 \
-    libgstreamer1.0-0 \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-base-apps \
-    gstreamer1.0-plugins-good \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
