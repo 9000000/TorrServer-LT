@@ -44,7 +44,7 @@ const formatDecimalInput = value => {
 }
 
 const emptyConfig = {
-  GSTVersion: GST_MIN_VERSION,
+  GSTVersion: 1.28,
   GSTPath: '',
   Source: 'stream',
   MaxTasks: 0,

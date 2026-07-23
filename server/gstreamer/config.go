@@ -66,7 +66,7 @@ func DefaultConfig() Config {
 
 func defaultConfigWithoutSettings() Config {
 	conf := Config{
-		GSTVersion:           minGSTVersion,
+		GSTVersion:           1.28,
 		Source:               "stream",
 		InactiveMinutes:      5,
 		AACBitrateKbps:       256,

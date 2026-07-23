@@ -10,7 +10,7 @@
 
 ARG LT_TAG=v2.0.13
 ARG GO_VERSION=1.25
-ARG ALPINE_VERSION=3.20
+ARG ALPINE_VERSION=3.21
 
 ############################
 # Stage 1: build libtorrent
