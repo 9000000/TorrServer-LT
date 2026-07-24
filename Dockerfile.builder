@@ -75,7 +75,7 @@ COPY . .
 
 WORKDIR /src/server
 
-ARG TS_VERSION=MatriX.142.LT-1.1.5
+ARG TS_VERSION=MatriX.142.LT-115.1
 
 # CGO_ENABLED=1 + fully-static via -extldflags '-static'.
 # pkg-config in lt.go resolves CXXFLAGS/LDFLAGS for libtorrent-rasterbar.
