@@ -37,14 +37,17 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         -DBUILD_SHARED_LIBS=OFF \
         -Dstatic_runtime=ON \
         -Ddeprecated-functions=ON \
-        -Dwebtorrent=OFF \
+        -Dwebtorrent=ON \
         -Dlogging=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
         -Dpython-bindings=OFF \
         -DCMAKE_INSTALL_PREFIX=/opt/lt \
  && cmake --build . -j"$(nproc)" \
- && cmake --install .
+ && cmake --install . \
+ && find . -name "*.a" -exec cp {} /opt/lt/lib/ \; \
+ && for f in /opt/lt/lib/*-static.a; do [ -f "$f" ] && cp "$f" "${f%-static.a}.a" || true; done \
+ && sed -i 's/Libs: .*/& -ldatachannel -ljuice -lusrsctp/' /opt/lt/lib/pkgconfig/libtorrent-rasterbar.pc
 
 ############################
 # Stage 2: build TorrServer-LT with GStreamer tag
