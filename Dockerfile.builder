@@ -7,11 +7,17 @@
 #   lt-build  — compiles libtorrent-rasterbar 2.x as a static archive
 #   go-build  — compiles the Go binary with cgo, statically linking libtorrent
 #               and all C/C++ deps (boost, openssl, zlib, libstdc++, musl)
-#   final     — scratch image with just the static binary + entrypoint
+#   final     — minimal scratch image with just the binary
+#
+# Stage 1 milestone: only proves the toolchain works end-to-end (lt.Version()).
+# Real wiring of session/torrent/storage lands in later milestones.
 
+# Global build arguments (can be overridden via Docker Compose `build.args`)
 ARG LT_TAG=v2.1.0
 ARG GO_VERSION=1.26
-ARG ALPINE_VERSION=3.24.1
+ARG ALPINE_VERSION=3.20
+ARG TS_VERSION=MatriX.142.LT-115.1
+ARG TS_PORT=8090
 
 ############################
 # Stage 1: build libtorrent
@@ -19,28 +25,28 @@ ARG ALPINE_VERSION=3.24.1
 FROM alpine:${ALPINE_VERSION} AS lt-build
 ARG LT_TAG
 
-RUN --mount=type=cache,target=/var/cache/apk \
-    apk add --no-cache \
-        build-base cmake curl linux-headers ccache \
+RUN apk add --no-cache \
+        build-base cmake git linux-headers \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
         zlib-dev zlib-static
 
 WORKDIR /src
-RUN LT_VER=$(echo ${LT_TAG} | sed 's/^v//') \
- && curl -sL https://github.com/arvidn/libtorrent/releases/download/${LT_TAG}/libtorrent-rasterbar-${LT_VER}.tar.gz | tar -xzf - \
- && mv libtorrent-rasterbar-${LT_VER} libtorrent
+RUN git clone --branch ${LT_TAG} --depth 1 --recurse-submodules \
+        https://github.com/arvidn/libtorrent.git
 
 WORKDIR /src/libtorrent/build
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=MinSizeRel \
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+# deprecated-functions=ON (ABI v2): the shim's torrent_info-from-buffer path
+# uses ctors that libtorrent 2.1 marks deprecated under ABI < 4; OFF (= newest
+# ABI) would remove them. webtorrent=ON is fine here: a NATIVE cmake build
+# handles the vendored libdatachannel + its submodules correctly (the cross
+# problem only exists in the b2 path, see build/_deps.sh).
+RUN cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -Dstatic_runtime=ON \
         -Ddeprecated-functions=ON \
         -Dwebtorrent=ON \
-        -Dlogging=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
         -Dpython-bindings=OFF \
@@ -52,75 +58,64 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Stage 2: build TorrServer-LT
 ############################
 FROM golang:${GO_VERSION}-alpine AS go-build
+ARG TS_VERSION
 
-RUN --mount=type=cache,target=/var/cache/apk \
-    apk add --no-cache \
+RUN apk add --no-cache \
         build-base musl-dev pkgconfig git \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
-        zlib-dev zlib-static \
-        upx
+        zlib-dev zlib-static
 
 # libtorrent artifacts from stage 1
 COPY --from=lt-build /opt/lt /opt/lt
 ENV PKG_CONFIG_PATH=/opt/lt/lib/pkgconfig
 
-# Cache go module downloads: copy go.mod/go.sum first
 WORKDIR /src
-COPY server/go.mod server/go.sum ./server/
-RUN --mount=type=cache,target=/go/pkg/mod \
-    cd server && go mod download
-
 COPY . .
 
 WORKDIR /src/server
-
-ARG TS_VERSION=MatriX.142.LT-115.1
 
 # CGO_ENABLED=1 + fully-static via -extldflags '-static'.
 # pkg-config in lt.go resolves CXXFLAGS/LDFLAGS for libtorrent-rasterbar.
 ENV CGO_ENABLED=1
 
 # Gate the static binary build on the lt + torrstor test suites so a
-# broken shim or piece-cache never ships.
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
+# broken shim or piece-cache never ships. libtorrent is static
+# (.a only under /opt/lt/lib) so the test binaries are fully
+# self-contained.
+RUN go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    go build \
+RUN go build \
       -tags 'osusergo netgo' \
       -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
       -o /out/TorrServer-LT \
-      ./cmd \
- && upx --best --lzma /out/TorrServer-LT
+      ./cmd
 
 ############################
-# Stage 3: final (scratch + busybox for shell entrypoint)
+# Stage 3: final
 ############################
-FROM busybox:1.37-musl AS final
+FROM alpine:${ALPINE_VERSION} AS final
+ARG TS_PORT
 
 LABEL maintainer="9000000"
-LABEL description="TorrServer-LT fully static lightweight image"
-
-# Grab CA certs from the builder (no apk needed in scratch-like image)
-COPY --link --from=go-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+LABEL description="TorrServer-LT fully-static lightweight image"
 
 ENV TS_CONF_PATH="/opt/ts/config" \
     TS_LOG_PATH="/opt/ts/log" \
     TS_TORR_DIR="/opt/ts/torrents" \
-    TS_PORT=8090 \
+    TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1
 
-COPY --link --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
-RUN ln -s /usr/local/bin/TorrServer-LT /usr/local/bin/torrserver
+RUN apk add --no-cache ca-certificates libstdc++
 
+COPY --link --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
 COPY --link docker-entrypoint.sh /docker-entrypoint.sh
-RUN sed -i 's/\r$//' /docker-entrypoint.sh \
+
+RUN ln -s /usr/local/bin/TorrServer-LT /usr/local/bin/torrserver \
+ && sed -i 's/\r$//' /docker-entrypoint.sh \
  && chmod +x /docker-entrypoint.sh /usr/local/bin/TorrServer-LT
 
-EXPOSE 8090
+EXPOSE ${TS_PORT}
 VOLUME ["/opt/ts/config", "/opt/ts/torrents"]
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

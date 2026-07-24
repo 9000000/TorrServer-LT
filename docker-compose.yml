@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  torrserver-lt:
+    container_name: torrserver-lt
+    build:
+      context: .
+      dockerfile: Dockerfile.builder
+      args:
+        LT_TAG: ${LT_TAG:-v2.1.0}
+        GO_VERSION: ${GO_VERSION:-1.26}
+        ALPINE_VERSION: ${ALPINE_VERSION:-3.20}
+        TS_VERSION: ${TS_VERSION:-MatriX.142.LT-115.1}
+        TS_PORT: ${TS_PORT:-8090}
+    restart: unless-stopped
+    ports:
+      - "${TS_PORT:-8090}:${TS_PORT:-8090}"
+    environment:
+      - TS_PORT=${TS_PORT:-8090}
+      - TS_CONF_PATH=/opt/ts/config
+      - TS_LOG_PATH=/opt/ts/log
+      - TS_TORR_DIR=/opt/ts/torrents
+    volumes:
+      - ./config:/opt/ts/config
+      - ./torrents:/opt/ts/torrents

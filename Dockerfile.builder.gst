@@ -20,16 +20,14 @@ ARG LT_TAG
 
 RUN --mount=type=cache,target=/var/cache/apk \
     apk add --no-cache \
-        build-base cmake git curl linux-headers ccache \
+        build-base cmake git linux-headers ccache \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
         zlib-dev zlib-static
 
-# Download release tarball instead of git clone (faster, smaller, no .git)
 WORKDIR /src
-RUN LT_VER=$(echo ${LT_TAG} | sed 's/^v//') \
- && curl -sL https://github.com/arvidn/libtorrent/releases/download/${LT_TAG}/libtorrent-rasterbar-${LT_VER}.tar.gz | tar -xzf - \
- && mv libtorrent-rasterbar-${LT_VER} libtorrent
+RUN git clone --branch ${LT_TAG} --depth 1 --recurse-submodules \
+        https://github.com/arvidn/libtorrent.git libtorrent
 
 WORKDIR /src/libtorrent/build
 RUN --mount=type=cache,target=/root/.cache/ccache \
