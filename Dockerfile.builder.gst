@@ -8,7 +8,7 @@
 #   final     — minimal Alpine image with GStreamer runtime libraries
 #
 
-ARG LT_TAG=v2.0.13
+ARG LT_TAG=v2.1.0
 ARG GO_VERSION=1.26
 ARG ALPINE_VERSION=3.24.1
 
@@ -38,7 +38,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DBUILD_SHARED_LIBS=OFF \
         -Dstatic_runtime=ON \
-        -Ddeprecated-functions=OFF \
+        -Ddeprecated-functions=ON \
+        -Dwebtorrent=ON \
         -Dlogging=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
@@ -73,7 +74,7 @@ COPY . .
 
 WORKDIR /src/server
 
-ARG TS_VERSION=MatriX.142.LT-114.1
+ARG TS_VERSION=MatriX.142.LT-1.1.5
 
 ENV CGO_ENABLED=1
 
