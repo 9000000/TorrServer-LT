@@ -16,7 +16,7 @@
 ARG LT_TAG=v2.1.0
 ARG GO_VERSION=1.26
 ARG ALPINE_VERSION=3.20
-ARG TS_VERSION=MatriX.142.LT-115.1
+ARG TS_VERSION=MatriX.142.LT-116.1
 ARG TS_PORT=8090
 
 ############################
@@ -38,15 +38,14 @@ RUN git clone --branch ${LT_TAG} --depth 1 --recurse-submodules \
 WORKDIR /src/libtorrent/build
 # deprecated-functions=ON (ABI v2): the shim's torrent_info-from-buffer path
 # uses ctors that libtorrent 2.1 marks deprecated under ABI < 4; OFF (= newest
-# ABI) would remove them. webtorrent=ON is fine here: a NATIVE cmake build
-# handles the vendored libdatachannel + its submodules correctly (the cross
-# problem only exists in the b2 path, see build/_deps.sh).
+# ABI) would remove them. webtorrent=OFF avoids unnecessary libdatachannel
+# dependencies and fixes static linking undefined reference errors (rtc::*).
 RUN cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -Dstatic_runtime=ON \
         -Ddeprecated-functions=ON \
-        -Dwebtorrent=ON \
+        -Dwebtorrent=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
         -Dpython-bindings=OFF \

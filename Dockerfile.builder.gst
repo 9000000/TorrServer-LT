@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         -DBUILD_SHARED_LIBS=OFF \
         -Dstatic_runtime=ON \
         -Ddeprecated-functions=ON \
-        -Dwebtorrent=ON \
+        -Dwebtorrent=OFF \
         -Dlogging=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
@@ -72,7 +72,7 @@ COPY . .
 
 WORKDIR /src/server
 
-ARG TS_VERSION=MatriX.142.LT-115.1
+ARG TS_VERSION=MatriX.142.LT-116.1
 
 ENV CGO_ENABLED=1
 

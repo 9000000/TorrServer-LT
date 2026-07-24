@@ -10,7 +10,7 @@ services:
         LT_TAG: ${LT_TAG:-v2.1.0}
         GO_VERSION: ${GO_VERSION:-1.26}
         ALPINE_VERSION: ${ALPINE_VERSION:-3.20}
-        TS_VERSION: ${TS_VERSION:-MatriX.142.LT-115.1}
+        TS_VERSION: ${TS_VERSION:-MatriX.142.LT-116.1}
         TS_PORT: ${TS_PORT:-8090}
     restart: unless-stopped
     ports:
