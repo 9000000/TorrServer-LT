@@ -54,7 +54,7 @@ RUN cmake .. \
  && cmake --install . \
  && find . -name "*.a" -exec cp {} /opt/lt/lib/ \; \
  && for f in /opt/lt/lib/*-static.a; do [ -f "$f" ] && cp "$f" "${f%-static.a}.a" || true; done \
- && sed -i 's/Libs: .*/& -ldatachannel -ljuice -lusrsctp/' /opt/lt/lib/pkgconfig/libtorrent-rasterbar.pc
+ && sed -i 's/-lssl -lcrypto/-ldatachannel -ljuice -lusrsctp -lssl -lcrypto/g' /opt/lt/lib/pkgconfig/libtorrent-rasterbar.pc
 
 ############################
 # Stage 2: build TorrServer-LT
