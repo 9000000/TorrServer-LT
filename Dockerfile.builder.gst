@@ -106,9 +106,11 @@ RUN apk add --no-cache \
         gst-plugins-bad \
         gst-plugins-ugly \
         gst-libav \
+        scanelf \
  && rm -rf /var/cache/apk/* \
            /usr/share/locale /usr/share/man /usr/share/doc /usr/share/gtk-doc \
            /usr/lib/libLLVM* /usr/lib/dri /usr/lib/libgallium* /usr/lib/libglapi* \
+           /usr/lib/libGL* /usr/lib/libEGL* /usr/lib/libgbm* \
  && rm -f /usr/lib/gstreamer-1.0/libgstopengl.so \
           /usr/lib/gstreamer-1.0/libgstvulkan.so \
           /usr/lib/gstreamer-1.0/libgstwayland.so \
@@ -118,7 +120,15 @@ RUN apk add --no-cache \
           /usr/lib/gstreamer-1.0/libgstgtk.so \
           /usr/lib/gstreamer-1.0/libgstjack.so \
           /usr/lib/gstreamer-1.0/libgstpulseaudio.so \
-          /usr/lib/gstreamer-1.0/libgstalsa.so
+          /usr/lib/gstreamer-1.0/libgstalsa.so \
+          /usr/lib/gstreamer-1.0/libgstoss*.so \
+          /usr/lib/gstreamer-1.0/libgstgoom*.so \
+          /usr/lib/gstreamer-1.0/libgstmonoscope.so \
+          /usr/lib/gstreamer-1.0/libgstrtsp*.so \
+          /usr/lib/gstreamer-1.0/libgstrtp*.so \
+          /usr/lib/gstreamer-1.0/libgsteffectv.so \
+ && scanelf --recursive --elf --path /usr/lib | xargs -r strip --strip-unneeded 2>/dev/null || true \
+ && apk del scanelf 2>/dev/null || true
 
 COPY --link --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
 COPY --link docker-entrypoint.sh /docker-entrypoint.sh
