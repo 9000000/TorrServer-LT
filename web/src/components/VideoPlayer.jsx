@@ -6,6 +6,7 @@ import {
   IconButton,
   Menu,
   MenuItem,
+  Paper,
   Slider,
   Tooltip,
   Typography,
@@ -26,7 +27,7 @@ import SubtitlesIcon from '@material-ui/icons/Subtitles'
 import VolumeOffIcon from '@material-ui/icons/VolumeOff'
 import VolumeUpIcon from '@material-ui/icons/VolumeUp'
 import Hls from 'hls.js'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useRef, useState } from 'react'
 import { StyledDialog } from 'style/CustomMaterialUiStyles'
 import { useTranslation } from 'react-i18next'
 
@@ -92,6 +93,17 @@ const useStyles = makeStyles(theme => ({
   dialogPaper: {
     backgroundColor: '#fff',
     borderRadius: theme.spacing(1),
+    // The desktop player floats as a modeless window: the modal root disables
+    // pointer events so clicks fall through to the page behind, so the Paper
+    // must re-enable them. A strong shadow makes it read as a window.
+    pointerEvents: 'auto',
+    boxShadow: theme.shadows[24],
+  },
+  // Desktop-only: the whole modal root ignores pointer events so clicks in the
+  // empty area around the floating player fall through to the page behind; only
+  // the Paper re-enables them (dialogPaper.pointerEvents = 'auto').
+  modelessRoot: {
+    pointerEvents: 'none',
   },
   header: {
     backgroundColor: '#00a572',
@@ -100,6 +112,7 @@ const useStyles = makeStyles(theme => ({
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    userSelect: 'none',
   },
   videoWrapper: {
     position: 'relative',
@@ -238,6 +251,75 @@ const subtitleLabel = track => {
   return track.lang && track.lang.toLowerCase() !== name.toLowerCase() ? `${name} (${track.lang})` : name
 }
 
+// DraggablePaper lets the player window be repositioned by dragging its header
+// (the MUI DialogTitle). It starts a drag only from the title bar — never from
+// its buttons or the video area — and clamps the window so it can't be lost
+// off-screen. `dragDisabled` turns it off (the fullscreen mobile layout). The
+// MUI-provided ref is forwarded so the Dialog open/close transition keeps
+// working; a second local ref measures the window for clamping.
+const DraggablePaper = forwardRef(({ dragDisabled, style, ...paperProps }, ref) => {
+  const [pos, setPos] = useState({ x: 0, y: 0 })
+  const nodeRef = useRef(null)
+  const dragRef = useRef(null)
+
+  const setRefs = node => {
+    nodeRef.current = node
+    if (typeof ref === 'function') ref(node)
+    // eslint-disable-next-line no-param-reassign
+    else if (ref) ref.current = node
+  }
+
+  useEffect(() => {
+    const onMove = e => {
+      const d = dragRef.current
+      if (!d) return
+      const margin = 80
+      const minX = margin - (d.baseX + d.width)
+      const maxX = window.innerWidth - margin - d.baseX
+      const minY = -d.baseY
+      const maxY = window.innerHeight - margin - d.baseY
+      const x = Math.max(minX, Math.min(maxX, d.ox + (e.clientX - d.sx)))
+      const y = Math.max(minY, Math.min(maxY, d.oy + (e.clientY - d.sy)))
+      setPos({ x, y })
+    }
+    const onUp = () => {
+      dragRef.current = null
+      document.body.style.userSelect = ''
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    return () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  const onMouseDown = e => {
+    if (dragDisabled || e.button !== 0) return
+    if (!e.target.closest('.MuiDialogTitle-root') || e.target.closest('button')) return
+    const rect = nodeRef.current ? nodeRef.current.getBoundingClientRect() : null
+    dragRef.current = {
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: pos.x,
+      oy: pos.y,
+      width: rect ? rect.width : 0,
+      baseX: rect ? rect.left - pos.x : 0,
+      baseY: rect ? rect.top - pos.y : 0,
+    }
+    document.body.style.userSelect = 'none'
+  }
+
+  return (
+    <Paper
+      {...paperProps}
+      ref={setRefs}
+      onMouseDown={onMouseDown}
+      style={{ ...style, transform: dragDisabled ? undefined : `translate(${pos.x}px, ${pos.y}px)` }}
+    />
+  )
+})
+
 const VideoPlayer = ({
   videoSrc,
   downloadSrc = videoSrc,
@@ -255,6 +337,9 @@ const VideoPlayer = ({
   const videoRef = useRef(null)
   const hlsRef = useRef(null)
   const onNotSupportedRef = useRef(onNotSupported)
+  // True while the pointer is over the floating player; gates keyboard shortcuts
+  // so the modeless player doesn't hijack Space/Arrows from the page behind.
+  const pointerInsideRef = useRef(false)
   const { t } = useTranslation()
   const [open, setOpen] = useState(initiallyOpen)
   const [videoElement, setVideoElement] = useState(null)
@@ -298,7 +383,22 @@ const VideoPlayer = ({
     setSubtitleTrack(-1)
 
     if (Hls.isSupported()) {
-      hlsPlayer = new Hls()
+      hlsPlayer = new Hls({
+        // A GStreamer seek must flush the pipeline, refetch torrent data at the
+        // new offset and transcode before the first byte of the segment is
+        // ready — on a cold or slow swarm that easily exceeds hls.js's default
+        // fragLoadPolicy.maxTimeToFirstByteMs (10s), which aborts the fetch and
+        // retries, re-triggering the seek and stalling playback. Give slow
+        // segments the same ~30s the server allows its pipeline to warm up.
+        fragLoadPolicy: {
+          default: {
+            maxTimeToFirstByteMs: 30000,
+            maxLoadTimeMs: 120000,
+            timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
+            errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+          },
+        },
+      })
       hlsRef.current = hlsPlayer
       // A cold GStreamer pipeline answers /gst/.../master.m3u8 with 502 until
       // the file head is buffered (server-side state-change timeout). This hits
@@ -461,9 +561,19 @@ const VideoPlayer = ({
     onClose?.()
   }
 
+  // Ignore backdrop clicks so a stray click outside the window doesn't kill
+  // playback; Escape and the Close button still close it.
+  const handleDialogClose = (_event, reason) => {
+    if (reason === 'backdropClick') return
+    closePlayer()
+  }
+
   const handleKey = useCallback(
     e => {
       if (!open) return
+      // Modeless on desktop: only act while the pointer is over the player, so
+      // Space/Arrows don't hijack typing or scrolling on the page behind.
+      if (!isMobile && !pointerInsideRef.current) return
       switch (e.key) {
         case ' ':
           e.preventDefault()
@@ -481,7 +591,7 @@ const VideoPlayer = ({
           break
       }
     },
-    [open, handlePlayPause, skip],
+    [open, isMobile, handlePlayPause, skip],
   )
   useEffect(() => {
     document.addEventListener('keydown', handleKey)
@@ -503,13 +613,27 @@ const VideoPlayer = ({
       )}
       <StyledDialog
         open={open}
-        onClose={closePlayer}
+        onClose={handleDialogClose}
         maxWidth='lg'
         fullWidth
         fullScreen={isMobile}
-        classes={{ paper: classes.dialogPaper }}
+        hideBackdrop={!isMobile}
+        disableEnforceFocus={!isMobile}
+        disableAutoFocus={!isMobile}
+        disableScrollLock={!isMobile}
+        classes={isMobile ? { paper: classes.dialogPaper } : { root: classes.modelessRoot, paper: classes.dialogPaper }}
+        PaperComponent={DraggablePaper}
+        PaperProps={{
+          dragDisabled: isMobile,
+          onMouseEnter: () => {
+            pointerInsideRef.current = true
+          },
+          onMouseLeave: () => {
+            pointerInsideRef.current = false
+          },
+        }}
       >
-        <DialogTitle className={classes.header} disableTypography>
+        <DialogTitle className={classes.header} disableTypography style={{ cursor: isMobile ? 'default' : 'move' }}>
           <Typography variant='h6' noWrap>
             {title || 'Video Player'}
           </Typography>

@@ -82,7 +82,7 @@ curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTo
 - Install a specific version:
 
   ```bash
-  sudo bash ./installTorrServerLinux.sh --install MatriX.142.LT-116.1 --silent
+  sudo bash ./installTorrServerLinux.sh --install MatriX.142.LT-1.1.8 --silent
   ```
 
 - Update to latest version:
