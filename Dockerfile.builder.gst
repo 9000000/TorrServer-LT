@@ -53,7 +53,7 @@ FROM golang:${GO_VERSION}-alpine AS go-build
 ARG TS_VERSION
 
 RUN apk add --no-cache \
-        build-base musl-dev pkgconfig git \
+        build-base musl-dev pkgconfig git upx \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
         zlib-dev zlib-static \
@@ -78,7 +78,8 @@ RUN go build \
       -tags 'osusergo netgo gst' \
       -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
       -o /out/TorrServer-LT \
-      ./cmd
+      ./cmd \
+ && upx --best --lzma /out/TorrServer-LT
 
 ############################
 # Stage 3: final image with GStreamer runtime
@@ -95,7 +96,7 @@ ENV TS_CONF_PATH="/opt/ts/config" \
     TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1
 
-# Install GStreamer runtime libraries and codec plugins
+# Install GStreamer runtime libraries and codec plugins, then prune non-headless GUI/display/audio plugins, heavy LLVM/Mesa 3D GPU drivers & docs
 RUN apk add --no-cache \
         ca-certificates \
         libstdc++ \
@@ -104,7 +105,20 @@ RUN apk add --no-cache \
         gst-plugins-good \
         gst-plugins-bad \
         gst-plugins-ugly \
-        gst-libav
+        gst-libav \
+ && rm -rf /var/cache/apk/* \
+           /usr/share/locale /usr/share/man /usr/share/doc /usr/share/gtk-doc \
+           /usr/lib/libLLVM* /usr/lib/dri /usr/lib/libgallium* /usr/lib/libglapi* \
+ && rm -f /usr/lib/gstreamer-1.0/libgstopengl.so \
+          /usr/lib/gstreamer-1.0/libgstvulkan.so \
+          /usr/lib/gstreamer-1.0/libgstwayland.so \
+          /usr/lib/gstreamer-1.0/libgstx11.so \
+          /usr/lib/gstreamer-1.0/libgstkms.so \
+          /usr/lib/gstreamer-1.0/libgstcairo.so \
+          /usr/lib/gstreamer-1.0/libgstgtk.so \
+          /usr/lib/gstreamer-1.0/libgstjack.so \
+          /usr/lib/gstreamer-1.0/libgstpulseaudio.so \
+          /usr/lib/gstreamer-1.0/libgstalsa.so
 
 COPY --link --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
 COPY --link docker-entrypoint.sh /docker-entrypoint.sh

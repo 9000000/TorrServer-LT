@@ -63,7 +63,7 @@ FROM golang:${GO_VERSION}-alpine AS go-build
 ARG TS_VERSION
 
 RUN apk add --no-cache \
-        build-base musl-dev pkgconfig git \
+        build-base musl-dev pkgconfig git upx \
         boost-dev boost-static \
         openssl-dev openssl-libs-static \
         zlib-dev zlib-static
@@ -91,7 +91,8 @@ RUN go build \
       -tags 'osusergo netgo' \
       -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
       -o /out/TorrServer-LT \
-      ./cmd
+      ./cmd \
+ && upx --best --lzma /out/TorrServer-LT
 
 ############################
 # Stage 3: final
@@ -108,7 +109,8 @@ ENV TS_CONF_PATH="/opt/ts/config" \
     TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1
 
-RUN apk add --no-cache ca-certificates libstdc++
+RUN apk add --no-cache ca-certificates libstdc++ \
+ && rm -rf /var/cache/apk/* /usr/share/locale /usr/share/man /usr/share/doc /usr/share/gtk-doc
 
 COPY --link --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT
 COPY --link docker-entrypoint.sh /docker-entrypoint.sh

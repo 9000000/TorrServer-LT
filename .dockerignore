@@ -1,18 +1,54 @@
+# Version control & CI/CD
 .git
 .github
-.cache
+.gitignore
+.gitlab-ci.yml
+
+# IDE & Editor files
 .vscode
 .idea
 .gemini
+*.swp
+*.swo
+.DS_Store
+
+# Build output & binary artifacts
 _out
 _deps
 _src
-build
-docker
+dist
+bin
+out
 upx
+*.exe
+*.a
+*.so
+*.dylib
+*.o
+*.tar.gz
+*.zip
+
+# Non-Docker scripts & configuration files
+build/
+nix/
+flake.nix
+patches/
+build-all.sh
+docker-all.sh
+installTorrServerLinux.sh
+installTorrServerMac.sh
+torrserver.service
+release.json
+
+# Documentation & Logs
+README.md
+LICENSE
 log.txt
 *.log
+
+# Web frontend dependencies & intermediate build outputs
 web/node_modules
 web/build
 web/dist
-web/.env_example
+web/.cache
+web/.env*
