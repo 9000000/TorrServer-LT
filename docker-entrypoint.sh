@@ -1,7 +1,7 @@
 #!/bin/sh
 
 TS_CONF_PATH="${TS_CONF_PATH:-/opt/ts/config}"
-TS_LOG_PATH="${TS_LOG_PATH:-/opt/ts/log}"
+TS_LOG_PATH="${TS_LOG_PATH:-}"
 TS_TORR_DIR="${TS_TORR_DIR:-/opt/ts/torrents}"
 TS_PORT="${TS_PORT:-8090}"
 

@@ -104,7 +104,7 @@ LABEL maintainer="9000000"
 LABEL description="TorrServer-LT fully-static lightweight image"
 
 ENV TS_CONF_PATH="/opt/ts/config" \
-    TS_LOG_PATH="/opt/ts/log" \
+    TS_LOG_PATH="" \
     TS_TORR_DIR="/opt/ts/torrents" \
     TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1

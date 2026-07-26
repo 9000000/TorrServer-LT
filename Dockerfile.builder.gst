@@ -76,7 +76,7 @@ RUN go test -tags gst -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrst
 # Build Go binary with '-tags gst' for GStreamer support
 RUN go build \
       -tags 'osusergo netgo gst' \
-      -ldflags "-s -w -X server/version.Version=${TS_VERSION} -linkmode external -extldflags '-static'" \
+      -ldflags "-s -w -X server/version.Version=${TS_VERSION}" \
       -o /out/TorrServer-LT \
       ./cmd \
  && upx --best --lzma /out/TorrServer-LT
@@ -91,7 +91,7 @@ LABEL maintainer="9000000"
 LABEL description="TorrServer-LT with GStreamer HLS transcoding support"
 
 ENV TS_CONF_PATH="/opt/ts/config" \
-    TS_LOG_PATH="/opt/ts/log" \
+    TS_LOG_PATH="" \
     TS_TORR_DIR="/opt/ts/torrents" \
     TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1

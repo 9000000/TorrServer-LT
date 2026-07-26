@@ -22,7 +22,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 
 ENV TS_CONF_PATH="/opt/ts/config" \
-    TS_LOG_PATH="/opt/ts/log" \
+    TS_LOG_PATH="" \
     TS_TORR_DIR="/opt/ts/torrents" \
     TS_PORT=8090 \
     GODEBUG=madvdontneed=1
