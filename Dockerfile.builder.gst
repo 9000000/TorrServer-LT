@@ -96,7 +96,7 @@ ENV TS_CONF_PATH="/opt/ts/config" \
     TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1
 
-# Install GStreamer runtime libraries and codec plugins, then prune non-headless GUI/display/audio plugins, heavy LLVM/Mesa 3D GPU drivers & docs
+# Install GStreamer runtime libraries and codec plugins, then safely prune non-headless GUI/display/audio hardware plugins, unused RTSP/RTP/effect plugins, locale, & docs
 RUN apk add --no-cache \
         ca-certificates \
         libstdc++ \
@@ -109,11 +109,7 @@ RUN apk add --no-cache \
         scanelf \
  && rm -rf /var/cache/apk/* \
            /usr/share/locale /usr/share/man /usr/share/doc /usr/share/gtk-doc \
-           /usr/lib/libLLVM* /usr/lib/dri /usr/lib/libgallium* /usr/lib/libglapi* \
-           /usr/lib/libGL* /usr/lib/libEGL* /usr/lib/libgbm* \
- && rm -f /usr/lib/gstreamer-1.0/libgstopengl.so \
-          /usr/lib/gstreamer-1.0/libgstvulkan.so \
-          /usr/lib/gstreamer-1.0/libgstwayland.so \
+ && rm -f /usr/lib/gstreamer-1.0/libgstwayland.so \
           /usr/lib/gstreamer-1.0/libgstx11.so \
           /usr/lib/gstreamer-1.0/libgstkms.so \
           /usr/lib/gstreamer-1.0/libgstcairo.so \
