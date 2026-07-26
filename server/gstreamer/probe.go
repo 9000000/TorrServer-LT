@@ -219,22 +219,38 @@ func (p ProbeInfo) IsVP9() bool  { return p.VideoCapsName() == "video/x-vp9" }
 func (p ProbeInfo) IsVP8() bool  { return p.VideoCapsName() == "video/x-vp8" }
 
 func probeSource(sourceURL string, conf Config) (ProbeInfo, error) {
-	output, err := runGSTDiscoverer(sourceURL, conf, gstProbeTimeout)
-	if strings.TrimSpace(output) == "" {
-		if err != nil {
-			return ProbeInfo{}, err
-		}
-		return ProbeInfo{}, errors.New("gst-discoverer returned no output")
-	}
+	const maxRetries = 10
+	const retryDelay = 5 * time.Second
 
-	probe := probeFromDiscoverer(output)
-	if len(probe.Tracks) == 0 {
-		if err != nil {
-			return ProbeInfo{}, fmt.Errorf("gst-discoverer parse failed: %w", err)
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retryDelay)
+			gstDebugf("probeSource retry %d/%d for %s", attempt, maxRetries, sourceURL)
 		}
-		return ProbeInfo{}, errors.New("gst-discoverer returned no stream info")
+
+		output, err := runGSTDiscoverer(sourceURL, conf, gstProbeTimeout)
+		if strings.TrimSpace(output) == "" {
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			lastErr = errors.New("gst-discoverer returned no output")
+			continue
+		}
+
+		probe := probeFromDiscoverer(output)
+		if len(probe.Tracks) == 0 {
+			if err != nil {
+				lastErr = fmt.Errorf("gst-discoverer parse failed: %w", err)
+				continue
+			}
+			lastErr = errors.New("gst-discoverer returned no stream info")
+			continue
+		}
+		return probe, nil
 	}
-	return probe, nil
+	return ProbeInfo{}, lastErr
 }
 
 func runGSTDiscoverer(sourceURL string, conf Config, timeout time.Duration) (string, error) {
