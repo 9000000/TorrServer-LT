@@ -502,7 +502,7 @@ void lt_free(void* p) {
 }
 
 size_t lt_shim_version(char* buf, size_t cap) {
-    static const std::string ver = "MatriX.LT-001";
+    static const std::string ver = "MatriX.142.LT-1.1.8";
     return copy_string(ver, buf, cap);
 }
 
