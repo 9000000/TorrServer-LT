@@ -39,8 +39,6 @@ export default function SettingsDialog({ handleClose }) {
   const [isIinaUsed, setIsIinaUsed] = useState(JSON.parse(localStorage.getItem('isIinaUsed')) ?? false)
   const [gstAvailable, setGstAvailable] = useState(false)
 
-  const tabMain = 0
-  const tabAdditional = 1
   const tabSearch = 2
   const tabApp = 3
   const tabGStreamer = 4
