@@ -561,6 +561,8 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		t.Stat = state.TorrentWorking
 	}
 	t.mu.Unlock()
+	// Push the auto-drop deadline forward so the time spent preloading doesn't eat into it.
+	t.AddExpiredTime(torrentExpireTimeout())
 
 	// Poll-gap prefetch (&preload path only). Keep the burst alive and build a
 	// readahead window PAST the head while the polling client launches its player,
