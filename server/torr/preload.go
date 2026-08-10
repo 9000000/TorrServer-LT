@@ -219,7 +219,11 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	t.mu.Lock()
 	t.PreloadSize = int64(len(gatePieces)) * plen
 	t.PreloadedBytes = 0
-	t.Stat = state.TorrentPreload
+	if probe {
+		t.Stat = state.TorrentPreload
+	} else {
+		t.Stat = state.TorrentWorking
+	}
 	t.mu.Unlock()
 
 	// prioritise raises priority 7 + an ascending deadline ramp (startN*10 ms,
@@ -396,7 +400,12 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	if isMP4Container(f.Path) {
 		detParent := ctx
 		go func() {
-			detCtx, detCancel := context.WithTimeout(detParent, 30*time.Second)
+			// A2: Adaptive moov detection timeout based on file size.
+			timeout := 30 * time.Second
+			if f.Length < 500<<20 { // < 500 MB
+				timeout = 10 * time.Second
+			}
+			detCtx, detCancel := context.WithTimeout(detParent, timeout)
 			defer detCancel()
 			if ms, me, ok := cache.LocateMoov(detCtx, lh, f.Offset, f.Length); ok {
 				log.TLogln("torr.Preload: moov auto-detected,", (me-ms)/1024, "KB at offset", ms-f.Offset)
@@ -437,10 +446,22 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	gateCount := len(gatePieces)
 	total := int64(gateCount) * plen
 	probed := false
-	tick := time.NewTicker(200 * time.Millisecond)
+
+	// A1: Event-driven gate. SubscribeGatePieces wakes us the moment ANY gate
+	// piece receives progress (a block write or completion), so the loop reacts
+	// instantly instead of polling every 200ms. On a fast torrent (>50 MB/s)
+	// the 200ms poll lag was ~10 MB of latent data; this shaves that off the
+	// preload time. A 1s fallback tick is kept for straggler escalation (which
+	// must refresh deadlines periodically) and progress-bar updates.
+	gateCh, gateCancel := cache.SubscribeGatePieces(ctx, gatePieces)
+	defer gateCancel()
+	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
-		snap := cache.PiecesSnapshot()
+		// C3: Targeted check. GetPiecesState only copies state for the gate pieces,
+		// instead of allocating a full copy of the entire piece map on every loop.
+		// Note: probePieces is always a subset of gatePieces, so they are included.
+		snap := cache.GetPiecesState(gatePieces)
 		var got int64
 		done := 0
 		for _, p := range gatePieces {
@@ -550,7 +571,9 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		}
 		select {
 		case <-ctx.Done(): // timeout or torrent closed
-		case <-tick.C:
+		case <-gateCh: // a gate piece progressed — recheck immediately
+			continue
+		case <-tick.C: // fallback for straggler escalation + progress updates
 			continue
 		}
 		break
@@ -780,9 +803,32 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 	if torr.playStarted {
 		inflightFirstFill := torr.preloadGateDone != nil && torr.preloadGateIndex == index
 		if !inflightFirstFill {
-			torr.preloadGateMu.Unlock()
-			dbg("skip: torrent already started (single-file semantics) — stream directly")
-			return
+			// Soft-reset: if the cache has evicted the head buffer for THIS file
+			// AND no readers are active AND no fill is in flight, allow a fresh
+			// preload. This handles the case where a torrent went idle, the cache
+			// was reclaimed, and the user plays again — without this they'd start
+			// on an empty buffer and stutter. The head-residency and body-reader
+			// checks below still guard against mid-playback re-fires.
+			shouldReset := false
+			if torr.preloadGateDone == nil { // no fill in flight for any file
+				if cache := torrstor.Global().CacheByHash([20]byte(torr.Hash())); cache != nil && cache.PieceLength > 0 {
+					if cache.ActiveReaders() == 0 {
+						if f := torr.fileByID(index); f != nil {
+							hl := preloadHeadLastPiece(f, cache.PieceLength, cache.NumPieces)
+							if !cache.Have(hl) {
+								shouldReset = true
+							}
+						}
+					}
+				}
+			}
+			if !shouldReset {
+				torr.preloadGateMu.Unlock()
+				dbg("skip: torrent already started (single-file semantics) — stream directly")
+				return
+			}
+			dbg("soft-reset: cache evicted head buffer, no active readers — allowing re-preload")
+			torr.playStartIndex = index
 		}
 	} else {
 		torr.playStarted = true
@@ -827,10 +873,8 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 	// start a second one and never skip onto a half-buffer (this is the reconnect
 	// path after an impatient player dropped the first connection).
 	if torr.preloadGateDone != nil && torr.preloadGateIndex == index {
-		done := torr.preloadGateDone
 		torr.preloadGateMu.Unlock()
-		dbg("wait: fill already in flight for this file")
-		waitBounded(reqCtx, done)
+		dbg("wait skipped: fill already in flight, resuming stream instantly to revive reader")
 		return
 	}
 	// A fill for a DIFFERENT file is in flight, or one finished within the
@@ -859,7 +903,7 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 		close(done)
 	}()
 
-	waitBounded(reqCtx, done)
+	dbg("fill started in background, returning instantly to allow reader creation")
 }
 
 // waitBounded blocks until the fill signalled by done completes, or reqCtx is

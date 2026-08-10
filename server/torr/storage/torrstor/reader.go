@@ -493,7 +493,24 @@ func (r *Reader) ensurePieceLocked(piece int, pieceOff int64) error {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, ReaderTimeout)
+
+	// B2: Adaptive reader timeout. Instead of a fixed 60s wait, scale based on
+	// current download speed so a fast swarm bails quickly on a stalled piece,
+	// while a slow swarm gets enough time to finish a large piece.
+	timeout := ReaderTimeout
+	if h := r.cache.handle.Load(); h != nil {
+		if st, err := h.Status(); err == nil && st.DownloadRate > 0 && r.cache.PieceLength > 0 {
+			est := int64(r.cache.PieceLength) / int64(st.DownloadRate)
+			timeout = time.Duration(est*2) * time.Second
+			if timeout < 15*time.Second {
+				timeout = 15 * time.Second
+			}
+			if timeout > 120*time.Second {
+				timeout = 120 * time.Second
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	// Flag the piece we're blocked on so applyStreamPriorities concentrates the
 	// swarm on it (force-raise to top priority + deadline 0) while the player waits —

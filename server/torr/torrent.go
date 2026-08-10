@@ -88,6 +88,10 @@ type Torrent struct {
 	closeOnce sync.Once
 
 	watcher *time.Ticker
+
+	// lastReannounce is the last time a health-check triggered ForceReannounce.
+	// Used to throttle auto-reannounce to at most once per 30s.
+	lastReannounce time.Time
 }
 
 // NewTorrent installs a new torrent in the session.
@@ -405,6 +409,25 @@ func (t *Torrent) progressTick() {
 	t.BytesReadUsefulData = st.TotalPayloadDownload
 	t.BytesWrittenData = st.TotalPayloadUpload
 	t.lastTimeSpeed = now
+
+	// B1: Swarm health-check — auto-reannounce when peers are critically low
+	// and an active reader is streaming. A network blip can disconnect all peers;
+	// without this the torrent waits for the next scheduled announce (up to 30 min)
+	// while the stream starves. Throttled to once per 30s per torrent.
+	if st.NumPeers < 3 && now.Sub(t.lastReannounce) > 30*time.Second {
+		if cache := torrstor.Global().CacheByHash([20]byte(t.Hash())); cache != nil && cache.ActiveReaders() > 0 {
+			t.lastReannounce = now
+			lh := t.lh
+			go func() {
+				if lh != nil {
+					_ = lh.ForceReannounce()
+					if settings.BTsets() == nil || !settings.BTsets().DisableDHT {
+						_ = lh.ForceDhtAnnounce()
+					}
+				}
+			}()
+		}
+	}
 }
 
 // ----- shutdown -----

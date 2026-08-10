@@ -116,6 +116,11 @@ type Cache struct {
 	// streaming session rather than on every range request.
 	announced atomic.Bool
 
+	// closed is flipped when the storage is closed or wiped (e.g. torrent removed).
+	// It aborts any in-flight WaitForBytes/WaitForPiece calls immediately, so HTTP
+	// readers don't hang waiting for a deleted torrent.
+	closed atomic.Bool
+
 	// handle is the libtorrent torrent backing this cache, captured from the
 	// first Reader. The Reader uses it (not eviction) to reconcile the
 	// have-bitfield on demand: if it needs a piece libtorrent has but the cache
@@ -366,6 +371,17 @@ func (c *Cache) signalPieceProgress(piece int) {
 	c.waitMu.Unlock()
 }
 
+// signalAllProgress broadcasts to EVERY parked piece waiter, forcing them
+// to wake up. Used during teardown (Cache.close/wipe) to unblock Readers.
+func (c *Cache) signalAllProgress() {
+	c.waitMu.Lock()
+	for piece, ch := range c.waiters {
+		close(ch)
+		delete(c.waiters, piece)
+	}
+	c.waitMu.Unlock()
+}
+
 // subscribePiece returns the piece's current progress channel, creating it if
 // no one is waiting yet.
 func (c *Cache) subscribePiece(piece int) chan struct{} {
@@ -385,6 +401,9 @@ func (c *Cache) subscribePiece(piece int) chan struct{} {
 // doesn't care about, so re-check and re-park.
 func (c *Cache) WaitForPiece(ctx context.Context, piece int) bool {
 	for {
+		if c.closed.Load() {
+			return false
+		}
 		if c.Have(piece) {
 			return true
 		}
@@ -409,6 +428,9 @@ func (c *Cache) WaitForPiece(ctx context.Context, piece int) bool {
 // downloads and hashes.
 func (c *Cache) WaitForBytes(ctx context.Context, piece int, off int64) bool {
 	for {
+		if c.closed.Load() {
+			return false
+		}
 		if c.readableAt(piece, off) > 0 {
 			return true
 		}
@@ -422,6 +444,50 @@ func (c *Cache) WaitForBytes(ctx context.Context, piece int, off int64) bool {
 			return false
 		}
 	}
+}
+
+// SubscribeGatePieces returns a channel that fires whenever ANY of the given
+// pieces receives progress (a block write or a completion signal). The preload
+// gate uses this to react instantly to piece arrivals instead of polling
+// PiecesSnapshot on a 200ms timer. The returned cancel function MUST be called
+// when the subscriber is done (typically via defer) to stop the fan-in
+// goroutines. Each piece's per-block progress signal wakes the fan-in, so the
+// gate loop runs on every meaningful event — not on a fixed tick — and
+// re-checks its own predicate (all gate pieces complete) each time.
+func (c *Cache) SubscribeGatePieces(ctx context.Context, pieces []int) (<-chan struct{}, context.CancelFunc) {
+	gateCtx, gateCancel := context.WithCancel(ctx)
+	out := make(chan struct{}, 1) // buffered so a burst of signals doesn't block senders
+	var wg sync.WaitGroup
+	for _, p := range pieces {
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				ch := c.subscribePiece(p)
+				select {
+				case <-ch:
+					// Fan-in: try to send (non-blocking) so the gate loop wakes.
+					select {
+					case out <- struct{}{}:
+					default:
+					}
+					// If piece is now complete, this goroutine is done.
+					if c.Have(p) {
+						return
+					}
+				case <-gateCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+	// Close out when all piece goroutines finish (all pieces complete or cancelled).
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out, gateCancel
 }
 
 // readableAt is how many bytes are contiguously readable at (piece, off) right
@@ -1389,6 +1455,9 @@ const maxTailPinPieces = 6
 // close drops the in-memory state for every piece but leaves on-disk
 // files in place — they're the source of truth for the next resume.
 func (c *Cache) close() {
+	c.closed.Store(true)
+	c.signalAllProgress()
+
 	// Drop any leftover preload reservation (e.g. a preview that never streamed)
 	// so a dropped torrent doesn't carry a stale reserve into its next resume.
 	c.preloadMu.Lock()
@@ -1406,6 +1475,9 @@ func (c *Cache) close() {
 // on-disk file (if any). Triggered when libtorrent asks us to delete
 // the storage (e.g. RemTorrent with delete=true).
 func (c *Cache) wipe() {
+	c.closed.Store(true)
+	c.signalAllProgress()
+
 	c.mu.Lock()
 	for _, p := range c.pieces {
 		p.wipe()
@@ -1621,11 +1693,27 @@ func (c *Cache) evictPass() (evictedAny bool) {
 		if p.SizeBytes() <= 0 || p.Complete() || pieceInRanges(p.Id, protect) {
 			continue
 		}
+		// C1: Adaptive abandon grace. A fixed 4s is too aggressive for slow torrents
+		// (e.g. 10 peers, piece takes 10-15s), causing pieces to be yanked mid-download.
+		// Scale grace based on current download rate, capped at 15s.
+		grace := int64(abandonEvictSec)
+		if h := c.handle.Load(); h != nil {
+			if st, err := h.Status(); err == nil && st.DownloadRate > 0 && c.PieceLength > 0 {
+				est := int64(c.PieceLength) / int64(st.DownloadRate)
+				adaptive := est * 2
+				if adaptive > grace {
+					grace = adaptive
+				}
+				if grace > 15 {
+					grace = 15 // cap at 15s to avoid stalling eviction
+				}
+			}
+		}
+
 		// A fully-sized incomplete piece isn't stranded: it has all its blocks and
 		// is queued for hashing. Give it the long hash grace so the (bounded, so
 		// possibly slow) hash worker reads it back before the reap can wipe it.
-		// Genuinely stranded PARTIALS keep the short abandon timer.
-		grace := int64(abandonEvictSec)
+		// Genuinely stranded PARTIALS keep the adaptive abandon timer.
 		if p.SizeBytes() >= c.PieceLength {
 			grace = hashGraceSec
 		}
@@ -1815,6 +1903,11 @@ func (c *Cache) capacityFor(protect [][2]int) int64 {
 		return 0
 	}
 	if want := c.streamingReserveFor(protect); want > base {
+		// C2: Streaming reserve cap. Prevent an unbounded reserve (from many concurrent
+		// streams or a massive preload) from inflating the cache to OOM. Cap at 2x base.
+		if maxCap := base * 2; want > maxCap {
+			return maxCap
+		}
 		return want
 	}
 	return base
@@ -1941,6 +2034,27 @@ func (c *Cache) PiecesSnapshot() map[int]state.ItemState {
 			Size:      p.SizeBytes(),
 			Completed: p.Complete(),
 			Priority:  0,
+		}
+	}
+	return out
+}
+
+// GetPiecesState returns a snapshot of the per-piece state for ONLY the requested
+// pieces. The preload gate uses this instead of PiecesSnapshot to avoid allocating
+// a full copy of the entire (potentially huge) piece map on every loop iteration.
+func (c *Cache) GetPiecesState(pieces []int) map[int]state.ItemState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[int]state.ItemState, len(pieces))
+	for _, id := range pieces {
+		if p, ok := c.pieces[id]; ok && p != nil {
+			out[id] = state.ItemState{
+				Id:        id,
+				Length:    c.PieceLength,
+				Size:      p.SizeBytes(),
+				Completed: p.Complete(),
+				Priority:  0,
+			}
 		}
 	}
 	return out
