@@ -349,17 +349,12 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		}
 	}
 
-	// libtorrent hack (cf. elementum): pause+resume kicks the piece picker so it
-	// re-evaluates and starts requesting the freshly-prioritised buffer pieces
-	// immediately, instead of waiting for its next tick. Only done here, at
-	// buffer startup — never per scheduleWindow (that would churn peers). And
-	// never while another client is actively streaming this torrent: pausing
-	// drops every peer connection, hiccuping the running stream, and the swarm
-	// is already hot — the picker will pull the new buffer without the kick.
-	if cache.ActiveReaders() == 0 {
-		_ = lh.Pause()
-		_ = lh.Resume()
-	}
+	// The libtorrent Pause/Resume hack (which kicks the piece picker) was removed here.
+	// While it forces an immediate re-evaluation of priorities, Pause() drops EVERY
+	// peer connection. If the torrent was already hot (e.g. switching episodes, or
+	// pre-warmed), dropping 50+ peers and reconnecting takes much longer than waiting
+	// <1s for the picker's natural tick. The picker respects the new priorities
+	// without the kick anyway.
 
 	// Find peers fast: kick trackers + DHT now (the torrent was lazy and lightly
 	// announced until this preload).
