@@ -502,8 +502,8 @@ func (r *Reader) ensurePieceLocked(piece int, pieceOff int64) error {
 		if st, err := h.Status(); err == nil && st.DownloadRate > 0 && r.cache.PieceLength > 0 {
 			est := int64(r.cache.PieceLength) / int64(st.DownloadRate)
 			timeout = time.Duration(est*2) * time.Second
-			if timeout < 15*time.Second {
-				timeout = 15 * time.Second
+			if timeout < 30*time.Second {
+				timeout = 30 * time.Second
 			}
 			if timeout > 120*time.Second {
 				timeout = 120 * time.Second
@@ -541,6 +541,9 @@ func (r *Reader) ensurePieceLocked(piece int, pieceOff int64) error {
 	}
 	if !r.cache.WaitForBytes(ctx, piece, pieceOff) {
 		if parent.Err() != nil {
+			if s := settings.BTsets(); s != nil && s.EnableDebug {
+				log.TLogln("torrstor.Reader: CLIENT GONE piece", piece, "off", pieceOff, "group", r.group)
+			}
 			return errors.New("torrstor.Reader: client gone")
 		}
 		if s := settings.BTsets(); s != nil && s.EnableDebug {

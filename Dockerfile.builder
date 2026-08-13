@@ -80,6 +80,7 @@ WORKDIR /src/server
 # CGO_ENABLED=1 + fully-static via -extldflags '-static'.
 # pkg-config in lt.go resolves CXXFLAGS/LDFLAGS for libtorrent-rasterbar.
 ENV CGO_ENABLED=1
+ENV CGO_CXXFLAGS="-DTSL_HAVE_LT_INTERNALS"
 
 # Gate the static binary build on the lt + torrstor test suites so a
 # broken shim or piece-cache never ships. libtorrent is static
