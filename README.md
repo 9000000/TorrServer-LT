@@ -381,8 +381,8 @@ deps (libdatachannel/usrsctp/libjuice), enabling https trackers/web seeds and
 WebTorrent (`wss://` trackers, browser peers). `cmake` is required on the build
 host for the WebRTC deps. Everything links statically — the only dynamic deps
 in the final binary are libc/libstdc++/libgcc (Windows links those static
-too). Versions are pinned in `build/_common.sh` (Boost 1.85.0, libtorrent
-v2.1.0, OpenSSL 3.5.7) and overridable, e.g.
+too). Versions are pinned in `build/_common.sh` (Boost 1.92.0, libtorrent
+v2.1.1, OpenSSL 3.5.7) and overridable, e.g.
 `LIBTORRENT_TAG=v2.0.13 build/linux-arm64.sh`. Full detail and the per-target
 prerequisites table: [`build/README.md`](build/README.md).
 

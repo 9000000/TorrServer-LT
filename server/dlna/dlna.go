@@ -64,7 +64,7 @@ func Start() {
 	dmsLogger := logger.WithNames("dms", "server")
 	dmsLogger.SetHandlers(ssdpNoiseFilter{next: dmsLogger.Handlers})
 	dmsServer = &dms.Server{
-		Logger: dmsLogger,
+		Logger: dmsLogger.Slogger(),
 		Interfaces: func() (ifs []net.Interface) {
 			var err error
 			ifaces, err := anet.Interfaces()
