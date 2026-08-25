@@ -115,6 +115,9 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 			break
 		}
 	}
+	if path == "" && len(t.Status().FileStats) == 1 && index == 1 {
+		path = t.Status().FileStats[0].Path
+	}
 	var f *File
 	for _, ff := range t.Files() {
 		if path != "" && ff.Path == path {
@@ -923,6 +926,9 @@ func (t *Torrent) fileByID(index int) *File {
 			path = fs.Path
 			break
 		}
+	}
+	if path == "" && len(t.Status().FileStats) == 1 && index == 1 {
+		path = t.Status().FileStats[0].Path
 	}
 	if path == "" {
 		return nil

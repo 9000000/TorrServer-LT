@@ -603,6 +603,9 @@ func (t *Torrent) Status() *state.TorrentStatus {
 		st.TorrentSize = lst.TotalSize
 		st.FileStats = nil
 		if files := t.Files(); len(files) > 0 {
+			catLower := strings.ToLower(st.Category)
+			isMovie := strings.Contains(catLower, "movie")
+
 			// Check for Smart Indexing (Movie Mode)
 			// Trigger if Category is explicitly "movie"
 			// OR if the largest file dominates the torrent (> 85% of total size), implying it's the main movie file.
@@ -619,7 +622,6 @@ func (t *Torrent) Status() *state.TorrentStatus {
 					}
 				}
 
-				isMovie := st.Category == "movie"
 				if !isMovie && totalSize > 0 {
 					// Heuristic: If largest file is > 85% of total size
 					if float64(maxSize) > float64(totalSize)*0.85 {
@@ -638,7 +640,6 @@ func (t *Torrent) Status() *state.TorrentStatus {
 
 			// Smart Indexing (TV Series Mode)
 			// Exclude "anime" to keep default indexing as requested
-			catLower := strings.ToLower(st.Category)
 			if strings.Contains(catLower, "tv") && !strings.Contains(catLower, "anime") {
 				// Full matches
 				reSeasonEp := regexp.MustCompile(`(?i)Season\W*(\d+).*\WEpisode\W*(\d+)`)
@@ -799,9 +800,13 @@ func (t *Torrent) Status() *state.TorrentStatus {
 			}
 
 			// Default Logic
-			for _, f := range files {
+			for i, f := range files {
+				id := f.Index + 1
+				if isMovie {
+					id = i + 1 // Main movie (files[0]) is always Id: 1
+				}
 				st.FileStats = append(st.FileStats, &state.TorrentFileStat{
-					Id:     f.Index + 1, // legacy: 0 means undefined in the web UI
+					Id:     id, // legacy: 0 means undefined in the web UI
 					Path:   f.Path,
 					Length: f.Length,
 				})

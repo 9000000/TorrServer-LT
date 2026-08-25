@@ -181,12 +181,16 @@ func stream(c *gin.Context) {
 
 	// find file
 	index := -1
-	if len(tor.Files()) == 1 {
+	catLower := strings.ToLower(tor.Category)
+	if strings.Contains(catLower, "movie") || strings.Contains(strings.ToLower(category), "movie") {
 		index = 1
-	} else {
-		ind, err := strconv.Atoi(indexStr)
-		if err == nil {
-			index = ind
+	} else if ind, err := strconv.Atoi(indexStr); err == nil {
+		index = ind
+	} else if len(tor.Files()) == 1 {
+		if st := tor.Status(); len(st.FileStats) == 1 {
+			index = st.FileStats[0].Id
+		} else {
+			index = 1
 		}
 	}
 	if index == -1 && play { // if file index not set and play file exec
@@ -366,12 +370,16 @@ func streamNoAuth(c *gin.Context) {
 
 	// find file
 	index := -1
-	if len(tor.Files()) == 1 {
+	catLower := strings.ToLower(tor.Category)
+	if strings.Contains(catLower, "movie") || strings.Contains(strings.ToLower(category), "movie") {
 		index = 1
-	} else {
-		ind, err := strconv.Atoi(indexStr)
-		if err == nil {
-			index = ind
+	} else if ind, err := strconv.Atoi(indexStr); err == nil {
+		index = ind
+	} else if len(tor.Files()) == 1 {
+		if st := tor.Status(); len(st.FileStats) == 1 {
+			index = st.FileStats[0].Id
+		} else {
+			index = 1
 		}
 	}
 	if index == -1 && play { // if file index not set and play file exec
