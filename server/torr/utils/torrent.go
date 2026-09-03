@@ -8,28 +8,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"server/settings"
 )
 
-var defTrackers = []string{
-	"http://retracker.local/announce",
-	"http://bt4.t-ru.org/ann?magnet",
-	"http://retracker.mgts.by:80/announce",
-	"http://tracker.city9x.com:2710/announce",
-	"http://tracker.electro-torrent.pl:80/announce",
-	"http://tracker.internetwarriors.net:1337/announce",
-	"http://tracker2.itzmx.com:6961/announce",
-	"udp://opentor.org:2710",
-	"udp://public.popcorn-tracker.org:6969/announce",
-	"udp://tracker.opentrackr.org:1337/announce",
-	"http://bt.svao-ix.ru/announce",
-	"udp://explodie.org:6969/announce",
-	"wss://tracker.btorrent.xyz",
-	"wss://tracker.openwebtorrent.com",
-}
+var (
+	defTrackers = []string{
+		"http://retracker.local/announce",
+		"http://bt4.t-ru.org/ann?magnet",
+		"http://retracker.mgts.by:80/announce",
+		"http://tracker.city9x.com:2710/announce",
+		"http://tracker.electro-torrent.pl:80/announce",
+		"http://tracker.internetwarriors.net:1337/announce",
+		"http://tracker2.itzmx.com:6961/announce",
+		"udp://opentor.org:2710",
+		"udp://public.popcorn-tracker.org:6969/announce",
+		"udp://tracker.opentrackr.org:1337/announce",
+		"http://bt.svao-ix.ru/announce",
+		"udp://explodie.org:6969/announce",
+		"wss://tracker.btorrent.xyz",
+		"wss://tracker.openwebtorrent.com",
+	}
 
-var loadedTrackers []string
+	trackerClient  = &http.Client{Timeout: 5 * time.Second}
+	trackerLoaded  bool
+	loadedTrackers []string
+)
 
 // GetTrackerFromFile loads optional trackers.txt from data dir.
 func GetTrackerFromFile() []string {
@@ -62,10 +67,12 @@ func GetDefTrackers() []string {
 }
 
 func loadNewTracker() {
-	if len(loadedTrackers) > 0 {
+	if trackerLoaded {
 		return
 	}
-	resp, err := http.Get("https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt")
+	trackerLoaded = true
+
+	resp, err := trackerClient.Get("https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt")
 	if err != nil {
 		return
 	}
@@ -80,7 +87,9 @@ func loadNewTracker() {
 			fresh = append(fresh, s)
 		}
 	}
-	loadedTrackers = append(fresh, defTrackers...)
+	if len(fresh) > 0 {
+		loadedTrackers = append(fresh, defTrackers...)
+	}
 }
 
 // PeerIDRandom builds a peer id with the given prefix padded to 20 chars

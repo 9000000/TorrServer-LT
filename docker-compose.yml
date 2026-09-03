@@ -8,7 +8,7 @@ services:
       dockerfile: Dockerfile.builder
       args:
         LT_TAG: ${LT_TAG:-v2.1.1}
-        GO_VERSION: ${GO_VERSION:-1.26}
+        GO_VERSION: ${GO_VERSION:-1.27.0}
         ALPINE_VERSION: ${ALPINE_VERSION:-3.20}
         TS_VERSION: ${TS_VERSION:-MatriX.142.LT-1.1.8}
         TS_PORT: ${TS_PORT:-8090}

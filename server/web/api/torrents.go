@@ -29,6 +29,10 @@ type torrReqJS struct {
 	SaveToDB bool   `json:"save_to_db,omitempty"`
 }
 
+func abortWithJSONError(c *gin.Context, code int, err error) {
+	c.AbortWithStatusJSON(code, gin.H{"error": err.Error()})
+}
+
 // torrents godoc
 //
 //	@Summary		Handle torrents informations
@@ -46,10 +50,9 @@ func torrents(c *gin.Context) {
 	var req torrReqJS
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, err)
+		abortWithJSONError(c, http.StatusBadRequest, err)
 		return
 	}
-	c.Status(http.StatusBadRequest)
 	switch req.Action {
 	case "add":
 		{
@@ -79,12 +82,17 @@ func torrents(c *gin.Context) {
 		{
 			wipeTorrents(c)
 		}
+	default:
+		{
+			abortWithJSONError(c, http.StatusBadRequest,
+				errors.Errorf("unknown action: %q", req.Action))
+		}
 	}
 }
 
 func addTorrent(req torrReqJS, c *gin.Context) {
 	if req.Link == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("link is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("link is empty"))
 		return
 	}
 
@@ -99,7 +107,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 		torrSpec, torrsHash, err = utils.ParseTorrsHash(req.Link)
 		if err != nil {
 			log.TLogln("error parse torrshash:", err)
-			c.AbortWithError(http.StatusBadRequest, err)
+			abortWithJSONError(c, http.StatusBadRequest, err)
 			return
 		}
 		if req.Title == "" {
@@ -115,7 +123,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 		torrSpec, err = utils.ParseLink(req.Link)
 		if err != nil {
 			log.TLogln("error parse link:", err)
-			c.AbortWithError(http.StatusBadRequest, err)
+			abortWithJSONError(c, http.StatusBadRequest, err)
 			return
 		}
 	}
@@ -123,7 +131,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 	tor, err := torr.AddTorrent(torrSpec, req.Title, req.Poster, req.Data, req.Category)
 	if err != nil {
 		log.TLogln("error add torrent:", err)
-		c.AbortWithError(http.StatusInternalServerError, err)
+		abortWithJSONError(c, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -157,7 +165,7 @@ func addTorrent(req torrReqJS, c *gin.Context) {
 
 func getTorrent(req torrReqJS, c *gin.Context) {
 	if req.Hash == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("hash is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("hash is empty"))
 		return
 	}
 	tor := torr.GetTorrent(req.Hash)
@@ -172,7 +180,7 @@ func getTorrent(req torrReqJS, c *gin.Context) {
 
 func setTorrent(req torrReqJS, c *gin.Context) {
 	if req.Hash == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("hash is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("hash is empty"))
 		return
 	}
 	torr.SetTorrent(req.Hash, req.Title, req.Poster, req.Category, req.Data)
@@ -181,7 +189,7 @@ func setTorrent(req torrReqJS, c *gin.Context) {
 
 func remTorrent(req torrReqJS, c *gin.Context) {
 	if req.Hash == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("hash is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("hash is empty"))
 		return
 	}
 	torr.RemTorrent(req.Hash)
@@ -209,7 +217,7 @@ func listTorrents(c *gin.Context) {
 
 func dropTorrent(req torrReqJS, c *gin.Context) {
 	if req.Hash == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("hash is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("hash is empty"))
 		return
 	}
 	torr.DropTorrent(req.Hash)

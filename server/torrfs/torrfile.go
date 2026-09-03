@@ -43,15 +43,15 @@ func NewTorrFile(parent INode, name string, file *torr.File) *TorrFile {
 func (f *TorrFile) Open(name string) (fs.File, error) {
 	r := f.Torrent().NewReader(f.file)
 	if r == nil {
-		return nil, fs.ErrInvalid
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
 	return &TorrFileHandle{TorrFile: f, r: r}, nil
 }
 
 // INode
-func (f *TorrFile) Parent() INode                 { return f.parent }
-func (f *TorrFile) Torrent() *torr.Torrent        { return f.torr }
-func (f *TorrFile) SetTorrent(t *torr.Torrent)    { f.torr = t }
+func (f *TorrFile) Parent() INode              { return f.parent }
+func (f *TorrFile) Torrent() *torr.Torrent     { return f.torr }
+func (f *TorrFile) SetTorrent(t *torr.Torrent) { f.torr = t }
 
 // DirEntry
 func (f *TorrFile) Name() string { return f.info.Name() }

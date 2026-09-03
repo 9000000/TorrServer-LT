@@ -101,11 +101,19 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	// playback position.
 	reader.SetContext(req.Context())
 
-	// Mark file as viewed (so /m3u?fromlast and the snake command
-	// reflect the latest playback position).
+	// Mark file as viewed without resetting existing TimeCode
+	// (so /m3u?fromlast and the snake command reflect the latest playback position).
+	var timecode float64
+	for _, v := range sets.ListViewed(t.Hash().HexString()) {
+		if v.FileIndex == fileID {
+			timecode = v.TimeCode
+			break
+		}
+	}
 	sets.SetViewed(&sets.Viewed{
 		Hash:      t.Hash().HexString(),
 		FileIndex: fileID,
+		TimeCode:  timecode,
 	})
 
 	// HTTP / DLNA headers.
