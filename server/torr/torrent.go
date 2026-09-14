@@ -107,6 +107,17 @@ func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
 		return nil, errors.New("torr.NewTorrent: nil spec")
 	}
 
+	// Auto-save incoming trackers from torrent/magnet into trackers.txt (no duplicates)
+	if len(spec.Trackers) > 0 {
+		var incoming []string
+		for _, tier := range spec.Trackers {
+			incoming = append(incoming, tier...)
+		}
+		if len(incoming) > 0 {
+			utils.SaveTrackersToFile(incoming)
+		}
+	}
+
 	// Trackers: applied via session-level retrackers settings in addition
 	// to per-torrent. Mirror legacy RetrackersMode semantics.
 	defTrackers := utils.GetDefTrackers()
@@ -279,6 +290,9 @@ func (t *Torrent) signalGotInfo() {
 				t.mu.Lock()
 				t.TorrentSpec.InfoBytes = mb
 				t.mu.Unlock()
+				if pt, err := lt.ParseTorrentBytes(mb); err == nil && len(pt.Trackers) > 0 {
+					utils.SaveTrackersToFile(pt.Trackers)
+				}
 			}
 		}
 		if t.gotInfoCh != nil {

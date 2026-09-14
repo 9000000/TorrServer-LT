@@ -171,18 +171,117 @@ func InitTrackers() {
 	})
 }
 
+var fileTrackersMu sync.Mutex
+
+func getTrackersFilePath() string {
+	dir := settings.Path
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "trackers.txt")
+}
+
+// SaveTrackersToFile saves new unique trackers from incoming torrents/magnets to trackers.txt.
+// It ensures no duplicates are written if the tracker is already in the file.
+func SaveTrackersToFile(trackers []string) {
+	if len(trackers) == 0 {
+		return
+	}
+
+	fileTrackersMu.Lock()
+	defer fileTrackersMu.Unlock()
+
+	targetFile := getTrackersFilePath()
+	dir := filepath.Dir(targetFile)
+
+	// Collect existing trackers from trackers.txt to avoid duplicates
+	seen := make(map[string]bool)
+	var existingTargetContent []byte
+
+	if buf, err := os.ReadFile(targetFile); err == nil {
+		existingTargetContent = buf
+		for _, line := range strings.Split(string(buf), "\n") {
+			if tr, ok := normalizeTracker(line); ok {
+				seen[strings.ToLower(tr)] = true
+			}
+		}
+	}
+
+	var newTrackers []string
+	for _, raw := range trackers {
+		tr, ok := normalizeTracker(raw)
+		if !ok {
+			continue
+		}
+		lower := strings.ToLower(tr)
+		if !seen[lower] {
+			seen[lower] = true
+			newTrackers = append(newTrackers, tr)
+		}
+	}
+
+	if len(newTrackers) == 0 {
+		return
+	}
+
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
+
+	f, err := os.OpenFile(targetFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.TLogln("utils.trackers: error opening", targetFile, ":", err)
+		return
+	}
+	defer f.Close()
+
+	var writeBuf strings.Builder
+	// If the file already exists, has content and doesn't end with a newline, append a newline first
+	if len(existingTargetContent) > 0 && existingTargetContent[len(existingTargetContent)-1] != '\n' {
+		writeBuf.WriteString("\n")
+	}
+
+	for _, tr := range newTrackers {
+		writeBuf.WriteString(tr)
+		writeBuf.WriteString("\n")
+	}
+
+	if _, err := f.WriteString(writeBuf.String()); err != nil {
+		log.TLogln("utils.trackers: error writing to", targetFile, ":", err)
+		return
+	}
+
+	log.TLogln("utils.trackers: auto-saved", len(newTrackers), "new trackers to", filepath.Base(targetFile))
+
+	// Immediately update in-memory loadedTrackers so running sessions can use them
+	trackersMu.Lock()
+	if len(loadedTrackers) > 0 {
+		memSeen := make(map[string]bool)
+		for _, tr := range loadedTrackers {
+			memSeen[strings.ToLower(tr)] = true
+		}
+		for _, tr := range newTrackers {
+			if !memSeen[strings.ToLower(tr)] {
+				memSeen[strings.ToLower(tr)] = true
+				loadedTrackers = append(loadedTrackers, tr)
+			}
+		}
+	}
+	trackersMu.Unlock()
+}
+
 // GetTrackerFromFile loads optional trackers.txt from data dir.
 func GetTrackerFromFile() []string {
-	name := filepath.Join(settings.Path, "trackers.txt")
-	buf, err := os.ReadFile(name)
+	targetFile := getTrackersFilePath()
+	buf, err := os.ReadFile(targetFile)
 	if err != nil {
 		return nil
 	}
 	var ret []string
 	seen := make(map[string]bool)
 	for _, l := range strings.Split(string(buf), "\n") {
-		if tr, ok := normalizeTracker(l); ok && !seen[tr] {
-			seen[tr] = true
+		if tr, ok := normalizeTracker(l); ok && !seen[strings.ToLower(tr)] {
+			seen[strings.ToLower(tr)] = true
 			ret = append(ret, tr)
 		}
 	}

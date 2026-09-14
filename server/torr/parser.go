@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"server/lt"
+	"server/torr/utils"
 	"server/torrshash"
 )
 
@@ -132,6 +133,7 @@ func ParseTorrsHash(token string) (*TorrentSpec, *torrshash.TorrsHash, error) {
 	var trackers [][]string
 	if t := th.Trackers(); len(t) > 0 {
 		trackers = [][]string{t}
+		utils.SaveTrackersToFile(t)
 	}
 	spec := &TorrentSpec{
 		InfoHash:    NewHashFromHex(th.Hash),
@@ -193,6 +195,9 @@ func parseHTTP(u string) (*TorrentSpec, error) {
 }
 
 func specFromParsed(pt *lt.ParsedTorrent, info []byte) *TorrentSpec {
+	if len(pt.Trackers) > 0 {
+		utils.SaveTrackersToFile(pt.Trackers)
+	}
 	var trackers [][]string
 	if len(pt.Trackers) > 0 {
 		trackers = [][]string{append([]string(nil), pt.Trackers...)}
