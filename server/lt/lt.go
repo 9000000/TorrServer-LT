@@ -144,19 +144,23 @@ func ShimVersion() string {
 // ----- low-level buffer helpers -----
 
 // cStringBuf invokes a "fill caller-provided buffer" shim function. It first
-// tries `initialCap` and retries once with the exact size the shim reported
-// if the value did not fit.
+// tries `initialCap` and retries if the value did not fit (copy_string requires
+// cap > s.size() to include the NUL terminator).
 func cStringBuf(call func(*C.char, C.size_t) C.size_t, initialCap int) string {
 	if initialCap < 16 {
 		initialCap = 16
 	}
 	buf := make([]byte, initialCap)
-	n := call((*C.char)(unsafe.Pointer(&buf[0])), C.size_t(initialCap))
-	if int(n) > initialCap {
-		buf = make([]byte, int(n)+1)
+	n := call((*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if int(n) >= len(buf) {
+		buf = make([]byte, int(n)+16)
 		n = call((*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+		if int(n) >= len(buf) {
+			buf = make([]byte, int(n)+1)
+			n = call((*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+		}
 	}
-	if int(n) == 0 {
+	if int(n) == 0 || int(n) >= len(buf) {
 		return ""
 	}
 	return string(buf[:int(n)])

@@ -636,22 +636,18 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	}
 
 	// Hand the buffer back to reader-driven scheduling: drop the preload's forced
-	// priority + deadline on every gate piece (SetPiecePriority 0 also clears the
-	// piece's deadline in libtorrent). Without this the head+tail pieces stay at
-	// priority 7 forever, so on a multi-file torrent EVERY file ever play-gated
-	// keeps its head buffer downloading in parallel with the one actually playing
-	// — observed: the heads of all 5 episodes fetching at once while only E01 was
-	// played ("downloading pieces everywhere"). The just-buffered pieces stay
-	// cached (the preload reserve, then the joining reader, protect them); the
-	// active file's reader re-raises priority on its live window via
-	// scheduleWindow, so the played file is unaffected while idle files go quiet.
-	// The poll-gap prefetch window is released the same way (it never joined the
-	// reserve, so it is plain prefetch the joining reader's window re-covers).
+	// priority + deadline on every gate piece. Setting priority to 0 does NOT clear
+	// deadlines in libtorrent, so we explicitly call ResetPieceDeadline as well.
+	// Without this the head+tail pieces stay time-critical or at priority 7 forever,
+	// so on a multi-file torrent EVERY file ever play-gated keeps downloading in
+	// parallel with the one actually playing.
 	for _, p := range gatePieces {
 		_ = lh.SetPiecePriority(p, 0)
+		_ = lh.ResetPieceDeadline(p)
 	}
 	for _, p := range warmPieces {
 		_ = lh.SetPiecePriority(p, 0)
+		_ = lh.ResetPieceDeadline(p)
 	}
 
 	log.TLogln("torr.Preload:", t.Name(), "buffered head", headFirst, "..", headLast,

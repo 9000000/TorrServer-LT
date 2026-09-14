@@ -117,16 +117,20 @@ inline int set_err_ec(int code, lt::error_code const& ec) {
     return code;
 }
 
-inline char* alloc_string(std::string const& s, size_t* out_len) {
-    if (out_len) *out_len = s.size();
-    char* p = static_cast<char*>(std::malloc(s.size() + 1));
+inline char* alloc_bytes(char const* data, size_t size, size_t* out_len) {
+    if (out_len) *out_len = size;
+    char* p = static_cast<char*>(std::malloc(size + 1));
     if (!p) {
         set_err(LT_ERR_INTERNAL, "out of memory");
         return nullptr;
     }
-    std::memcpy(p, s.data(), s.size());
-    p[s.size()] = '\0';
+    std::memcpy(p, data, size);
+    p[size] = '\0';
     return p;
+}
+
+inline char* alloc_string(std::string const& s, size_t* out_len) {
+    return alloc_bytes(s.data(), s.size(), out_len);
 }
 
 inline size_t copy_string(std::string const& s, char* buf, size_t cap) {
@@ -533,7 +537,10 @@ lt_session lt_session_new(const char* settings_json) {
                 }
                 std::string warn;
                 json_into_settings(j, params.settings, &warn);
-                if (!warn.empty()) g_last_error = "settings warnings: " + warn;
+                if (!warn.empty()) {
+                    std::lock_guard<std::mutex> lk(g_err_mu);
+                    g_last_error = "settings warnings: " + warn;
+                }
             } catch (std::exception const& e) {
                 set_err(LT_ERR_PARSE, std::string("settings json parse: ") + e.what());
                 return 0;
@@ -585,7 +592,10 @@ int lt_session_apply_settings(lt_session id, const char* settings_json) {
     std::string warn;
     json_into_settings(j, sp, &warn);
     slot->s->apply_settings(std::move(sp));
-    if (!warn.empty()) g_last_error = "settings warnings: " + warn;
+    if (!warn.empty()) {
+        std::lock_guard<std::mutex> lk(g_err_mu);
+        g_last_error = "settings warnings: " + warn;
+    }
     return LT_OK;
     WRAP_END(LT_ERR_INTERNAL)
 }
@@ -597,10 +607,17 @@ int lt_session_get_setting_int(lt_session id, const char* name, int64_t* out) {
     if (!name || !*name) return set_err(LT_ERR_INVALID, "empty setting name");
     int sid = lt::setting_by_name(name);
     if (sid < 0) return set_err(LT_ERR_NOT_FOUND, "unknown setting");
-    if ((sid & lt::settings_pack::type_mask) != lt::settings_pack::int_type_base)
-        return set_err(LT_ERR_INVALID, "not an int setting");
+    int type_mask = sid & lt::settings_pack::type_mask;
+    if (type_mask != lt::settings_pack::int_type_base && type_mask != lt::settings_pack::bool_type_base)
+        return set_err(LT_ERR_INVALID, "not an int/bool setting");
     lt::settings_pack sp = slot->s->get_settings();
-    if (out) *out = sp.get_int(sid);
+    if (out) {
+        if (type_mask == lt::settings_pack::bool_type_base) {
+            *out = sp.get_bool(sid) ? 1 : 0;
+        } else {
+            *out = sp.get_int(sid);
+        }
+    }
     return LT_OK;
     WRAP_END(LT_ERR_INTERNAL)
 }
@@ -689,7 +706,7 @@ lt_torrent lt_session_add_torrent(
         if (!slot) { set_err(LT_ERR_NOT_FOUND, "session not found"); return 0; }
 
         lt::add_torrent_params atp;
-        atp.save_path = save_path ? save_path : ".";
+        atp.save_path = (save_path && *save_path) ? save_path : ".";
 
         if (info_bytes && info_len > 0) {
             lt::error_code ec;
@@ -849,8 +866,7 @@ char* lt_torrent_metadata_alloc(lt_torrent tid, size_t* out_len) {
         auto ti = h.torrent_file();
         if (!ti || !ti->is_valid()) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return nullptr; }
         auto const& info = ti->info_section();
-        std::string s(info.data(), info.size());
-        return alloc_string(s, out_len);
+        return alloc_bytes(info.data(), info.size(), out_len);
     } catch (std::exception const& e) {
         set_err(LT_ERR_INTERNAL, e.what());
         return nullptr;
@@ -874,7 +890,11 @@ size_t lt_torrent_file_path(lt_torrent tid, int idx, char* buf, size_t cap) {
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return 0; }
         auto ti = h.torrent_file();
         if (!ti) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return 0; }
-        auto const& fs = ti->files();
+#if LIBTORRENT_VERSION_NUM >= 20100
+        auto const& fs = ti->layout();
+#else
+        auto const& fs = ti->orig_files();
+#endif
         if (idx < 0 || idx >= fs.num_files()) { set_err(LT_ERR_INVALID, "file index out of range"); return 0; }
         std::string p = fs.file_path(lt::file_index_t{idx});
         return copy_string(p, buf, cap);
@@ -891,7 +911,11 @@ int64_t lt_torrent_file_size(lt_torrent tid, int idx) {
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
         auto ti = h.torrent_file();
         if (!ti) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return -1; }
-        auto const& fs = ti->files();
+#if LIBTORRENT_VERSION_NUM >= 20100
+        auto const& fs = ti->layout();
+#else
+        auto const& fs = ti->orig_files();
+#endif
         if (idx < 0 || idx >= fs.num_files()) { set_err(LT_ERR_INVALID, "file index out of range"); return -1; }
         return fs.file_size(lt::file_index_t{idx});
     } catch (std::exception const& e) {
@@ -907,7 +931,11 @@ int64_t lt_torrent_file_offset(lt_torrent tid, int idx) {
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
         auto ti = h.torrent_file();
         if (!ti) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return -1; }
-        auto const& fs = ti->files();
+#if LIBTORRENT_VERSION_NUM >= 20100
+        auto const& fs = ti->layout();
+#else
+        auto const& fs = ti->orig_files();
+#endif
         if (idx < 0 || idx >= fs.num_files()) { set_err(LT_ERR_INVALID, "file index out of range"); return -1; }
         return fs.file_offset(lt::file_index_t{idx});
     } catch (std::exception const& e) {
@@ -932,8 +960,11 @@ int lt_torrent_num_pieces(lt_torrent tid) {
 // un-have just that piece on demand. Returns 1 = have, 0 = not, -1 = error.
 int lt_torrent_have_piece(lt_torrent tid, int piece_idx) {
     WRAP_BEGIN
+    if (piece_idx < 0) return 0;
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
+    auto ti = h.torrent_file();
+    if (ti && piece_idx >= ti->num_pieces()) return 0;
     return h.have_piece(lt::piece_index_t{piece_idx}) ? 1 : 0;
     WRAP_END(LT_ERR_INTERNAL)
 }
@@ -996,6 +1027,7 @@ size_t lt_torrent_info_hash_hex(lt_torrent tid, char* buf, size_t cap) {
 
 int lt_torrent_set_piece_priority(lt_torrent tid, int piece_idx, int prio) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     if (prio < 0 || prio > 7) return set_err(LT_ERR_INVALID, "prio out of range");
@@ -1069,6 +1101,7 @@ int lt_torrent_prioritize_pieces(lt_torrent tid, const int* prios, int count) {
 // non-zero prio; pass 0 to un-have and leave it lazy.
 int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     if (prio < 0 || prio > 7) return set_err(LT_ERR_INVALID, "prio out of range");
@@ -1083,8 +1116,10 @@ int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
         // (e.g. a seeding torrent with have_all and no picker), so we_dont_have
         // works even after the torrent finished.
         if (!tor->has_picker()) tor->need_picker();
-        tor->set_piece_priority(pi, lt::dont_download);
-        tor->picker().we_dont_have(pi);
+        if (tor->have_piece(pi)) {
+            tor->set_piece_priority(pi, lt::dont_download);
+            tor->picker().we_dont_have(pi);
+        }
         // Re-apply the requested priority last so the picker will (or won't)
         // re-request the piece exactly as the caller intends.
         tor->set_piece_priority(pi,
@@ -1106,6 +1141,7 @@ int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
 
 int lt_torrent_set_piece_deadline(lt_torrent tid, int piece_idx, int deadline_ms, int alert_when_ready) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     lt::deadline_flags_t flags = {};
@@ -1131,6 +1167,7 @@ int lt_torrent_set_sequential_download(lt_torrent tid, int enable) {
 
 int lt_torrent_reset_piece_deadline(lt_torrent tid, int piece_idx) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     // reset_piece_deadline takes the piece off the time-critical list. Public
@@ -1286,9 +1323,16 @@ char* lt_parse_torrent_bytes_alloc(const uint8_t* buf, size_t len, size_t* out_l
         atp.ti = ti;
         atp.info_hashes = ti->info_hashes();
         atp.name = ti->name();
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
         for (auto const& tracker : ti->trackers()) {
             atp.trackers.push_back(tracker.url);
         }
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         return parse_atp_to_json(atp, out_len);
     } catch (std::exception const& e) {
         set_err(LT_ERR_INTERNAL, e.what());

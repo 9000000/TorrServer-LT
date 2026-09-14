@@ -85,6 +85,7 @@ func (bt *BTServer) Connect() error {
 	go bt.expireWatch(bt.stopAlert)
 
 	InitApiHelper(bt)
+	utils.InitTrackers()
 	return nil
 }
 
@@ -263,6 +264,8 @@ func (bt *BTServer) expireWatch(stop <-chan struct{}) {
 func (bt *BTServer) handleAlert(a *lt.Alert) {
 	if settings.BTsets() != nil && settings.BTsets().EnableDebug && a.Type != "" {
 		log.Printf("lt: %s — %s", a.Type, a.Message)
+	} else if (a.Category&1) != 0 || strings.Contains(a.Type, "error") || strings.Contains(a.Type, "failed") {
+		log.Printf("lt [%s]: %s", a.Type, a.Message)
 	}
 	if len(a.Counters) > 0 && (a.Type == "session_stats" || a.Type == "session_stats_alert") {
 		bt.statsMu.Lock()
@@ -287,7 +290,13 @@ func (bt *BTServer) handleAlert(a *lt.Alert) {
 		t.signalGotInfo()
 	case "torrent_error", "file_error":
 		log.Printf("torr: torrent error for %s: %s", a.TorrentHash, a.Error)
+	case "hash_failed", "hash_failed_alert":
+		t.IncPiecesDirtiedBad()
+		if cache := torrstor.Global().CacheByHash([20]byte(t.Hash())); cache != nil {
+			cache.SignalHashFailed(a.Piece)
+		}
 	case "piece_finished", "piece_finished_alert", "read_piece":
+		t.IncPiecesDirtiedGood()
 		// Wake any Reader blocked on the piece. The actual byte data
 		// is already on the disk side (libtorrent wrote it through
 		// our cb_write before posting this alert).

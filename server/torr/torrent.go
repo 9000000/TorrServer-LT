@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"server/log"
@@ -47,9 +48,12 @@ type Torrent struct {
 	BytesReadUsefulData int64
 	BytesWrittenData    int64
 
-	// counters driven by the alert pump (atomic-friendly under mu)
+	// counters driven by the alert pump (atomic)
 	piecesDirtiedGood int64
 	piecesDirtiedBad  int64
+
+	filesMu     sync.RWMutex
+	cachedFiles []*File
 
 	PreloadSize    int64
 	PreloadedBytes int64
@@ -505,11 +509,37 @@ func (t *Torrent) Length() int64 {
 	return t.lh.TotalSize()
 }
 
-// Files returns the file list once metadata is known.
+// IncPiecesDirtiedGood increments the good (verified) piece counter.
+func (t *Torrent) IncPiecesDirtiedGood() {
+	if t == nil {
+		return
+	}
+	atomic.AddInt64(&t.piecesDirtiedGood, 1)
+}
+
+// IncPiecesDirtiedBad increments the bad (corrupt/hash failed) piece counter.
+func (t *Torrent) IncPiecesDirtiedBad() {
+	if t == nil {
+		return
+	}
+	atomic.AddInt64(&t.piecesDirtiedBad, 1)
+}
+
+// Files returns the file list once metadata is known. Caches the result
+// since metadata is immutable once received.
 func (t *Torrent) Files() []*File {
 	if t == nil || t.lh == nil {
 		return nil
 	}
+	t.filesMu.RLock()
+	if t.cachedFiles != nil {
+		out := make([]*File, len(t.cachedFiles))
+		copy(out, t.cachedFiles)
+		t.filesMu.RUnlock()
+		return out
+	}
+	t.filesMu.RUnlock()
+
 	raw, err := t.lh.Files()
 	if err != nil || len(raw) == 0 {
 		return nil
@@ -525,7 +555,13 @@ func (t *Torrent) Files() []*File {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return utils2.CompareStrings(out[i].Path, out[j].Path) })
-	return out
+
+	t.filesMu.Lock()
+	t.cachedFiles = out
+	ret := make([]*File, len(out))
+	copy(ret, out)
+	t.filesMu.Unlock()
+	return ret
 }
 
 // LTHandle returns the underlying libtorrent handle for callers that
@@ -592,8 +628,8 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.ChunksReadUseful = st.ChunksRead
 	st.ChunksReadWasted = (lst.TotalDownload - lst.TotalPayloadDownload) / chunkSize
 	st.ChunksWritten = lst.TotalPayloadUpload / chunkSize
-	st.PiecesDirtiedGood = t.piecesDirtiedGood
-	st.PiecesDirtiedBad = t.piecesDirtiedBad
+	st.PiecesDirtiedGood = atomic.LoadInt64(&t.piecesDirtiedGood)
+	st.PiecesDirtiedBad = atomic.LoadInt64(&t.piecesDirtiedBad)
 
 	if !lst.HasMetadata {
 		// Metadata still in flight — fall back to the DB-cached file list (if

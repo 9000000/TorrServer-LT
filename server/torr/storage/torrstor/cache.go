@@ -358,6 +358,23 @@ func (c *Cache) SignalPieceComplete(piece int) {
 	c.signalPieceProgress(piece)
 }
 
+// SignalHashFailed is invoked from BTServer's alert pump when
+// libtorrent reports `hash_failed_alert` for this torrent. Wipes
+// the corrupt piece from memory so libtorrent can re-download clean blocks.
+func (c *Cache) SignalHashFailed(piece int) {
+	c.mu.RLock()
+	if piece >= 0 && piece < len(c.pieces) {
+		p := c.pieces[piece]
+		c.mu.RUnlock()
+		if p != nil {
+			p.wipe()
+		}
+	} else {
+		c.mu.RUnlock()
+	}
+	c.signalPieceProgress(piece)
+}
+
 // signalPieceProgress broadcasts to whoever is parked on this piece (close the
 // channel, drop it so the next subscriber makes a fresh one). Fired on piece
 // completion and on every block write to a waited piece; waiters re-check
@@ -1688,27 +1705,30 @@ func (c *Cache) evictPass() (evictedAny bool) {
 	// untouched past abandonEvictSec and OUTSIDE the protected window, forget them
 	// (WeDontHave priority 0 so the picker won't re-request — makes the wipe safe)
 	// and drop them.
+	// C1: Adaptive abandon grace. A fixed 4s is too aggressive for slow torrents
+	// (e.g. 10 peers, piece takes 10-15s), causing pieces to be yanked mid-download.
+	// Scale grace based on current download rate, capped at 15s. Read status once outside
+	// the loop to avoid calling Cgo / JSON decode per piece.
+	defaultGrace := int64(abandonEvictSec)
+	if h := c.handle.Load(); h != nil {
+		if st, err := h.Status(); err == nil && st.DownloadRate > 0 && c.PieceLength > 0 {
+			est := int64(c.PieceLength) / int64(st.DownloadRate)
+			adaptive := est * 2
+			if adaptive > defaultGrace {
+				defaultGrace = adaptive
+			}
+			if defaultGrace > 15 {
+				defaultGrace = 15 // cap at 15s to avoid stalling eviction
+			}
+		}
+	}
+
 	nowU := time.Now().Unix()
 	for _, p := range pieces {
 		if p.SizeBytes() <= 0 || p.Complete() || pieceInRanges(p.Id, protect) {
 			continue
 		}
-		// C1: Adaptive abandon grace. A fixed 4s is too aggressive for slow torrents
-		// (e.g. 10 peers, piece takes 10-15s), causing pieces to be yanked mid-download.
-		// Scale grace based on current download rate, capped at 15s.
-		grace := int64(abandonEvictSec)
-		if h := c.handle.Load(); h != nil {
-			if st, err := h.Status(); err == nil && st.DownloadRate > 0 && c.PieceLength > 0 {
-				est := int64(c.PieceLength) / int64(st.DownloadRate)
-				adaptive := est * 2
-				if adaptive > grace {
-					grace = adaptive
-				}
-				if grace > 15 {
-					grace = 15 // cap at 15s to avoid stalling eviction
-				}
-			}
-		}
+		grace := defaultGrace
 
 		// A fully-sized incomplete piece isn't stranded: it has all its blocks and
 		// is queued for hashing. Give it the long hash grace so the (bounded, so
