@@ -47,8 +47,11 @@ export default function SecondarySettingsComponent({ settings, inputForm }) {
   const [loading, setLoading] = useState(false)
   const {
     RetrackersMode,
+    TrackersListURL,
+    DefaultTrackers,
     TorrentDisconnectTimeout,
     EnableDebug,
+    MergeAllM3U,
     EnableDLNA,
     EnableBonjour,
     EnableIPv6,
@@ -322,6 +325,14 @@ export default function SecondarySettingsComponent({ settings, inputForm }) {
         />
         <FormHelperText margin='none'>{t('SettingsDialog.EnableDebugHint')}</FormHelperText>
       </FormGroup>
+      <FormGroup>
+        <FormControlLabel
+          control={<Switch checked={!!MergeAllM3U} onChange={inputForm} id='MergeAllM3U' color='secondary' />}
+          label={t('SettingsDialog.MergeAllM3U')}
+          labelPlacement='start'
+        />
+        <FormHelperText margin='none'>{t('SettingsDialog.MergeAllM3UHint')}</FormHelperText>
+      </FormGroup>
       <br />
       <FormGroup style={{ marginBottom: '20px' }}>
         <InputLabel htmlFor='RetrackersMode'>{t('SettingsDialog.RetrackersMode')}</InputLabel>
@@ -342,6 +353,30 @@ export default function SecondarySettingsComponent({ settings, inputForm }) {
         </Select>
         <FormHelperText style={{ marginTop: '8px' }}>{t('SettingsDialog.RetrackersModeHint')}</FormHelperText>
       </FormGroup>
+      <TextField
+        onChange={inputForm}
+        margin='normal'
+        id='TrackersListURL'
+        label={t('SettingsDialog.TrackersListURL')}
+        helperText={t('SettingsDialog.TrackersListURLHint')}
+        value={TrackersListURL || ''}
+        type='url'
+        variant='outlined'
+        fullWidth
+      />
+      <TextField
+        onChange={inputForm}
+        margin='normal'
+        id='DefaultTrackers'
+        label={t('SettingsDialog.DefaultTrackers')}
+        helperText={t('SettingsDialog.DefaultTrackersHint')}
+        value={DefaultTrackers || ''}
+        type='text'
+        variant='outlined'
+        fullWidth
+        multiline
+        minRows={6}
+      />
       {/* DLNA Section */}
       <SettingSectionLabel style={{ marginTop: '20px' }}>{t('DLNA')}</SettingSectionLabel>
       <FormControlLabel

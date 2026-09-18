@@ -45,9 +45,11 @@ type BTSets struct {
 
 	// Torrent
 	ForceEncrypt             bool
-	RetrackersMode           int  // 0 - don`t add, 1 - add retrackers (def), 2 - remove retrackers 3 - replace retrackers
-	TorrentDisconnectTimeout int  // in seconds
-	EnableDebug              bool // debug logs
+	RetrackersMode           int    // 0 - don`t add, 1 - add retrackers (def), 2 - remove retrackers 3 - replace retrackers
+	TrackersListURL          string // optional custom remote trackers list URL, tried before the built-in mirrors; empty = mirrors only
+	DefaultTrackers          string // newline-separated announce URLs: the local list, merged after the remote one and used alone when it can't be fetched
+	TorrentDisconnectTimeout int    // in seconds
+	EnableDebug              bool   // debug logs
 
 	// DLNA
 	EnableDLNA   bool
@@ -116,12 +118,41 @@ type BTSets struct {
 
 	// Viewed timecodes
 	TrackTimecode bool // store playback position (timecode) in viewed data
+
+	// M3U
+	MergeAllM3U bool // list every torrent's files inline in /playlistall/all.m3u instead of one nested playlist per torrent
 }
 
 func (v *BTSets) String() string {
 	buf, _ := json.Marshal(v)
 	return string(buf)
 }
+
+// DefaultTrackersListURLs are the built-in mirrors of the remote trackers list,
+// tried in order (after TrackersListURL when set). The non-GitHub mirrors keep
+// the list reachable where raw.githubusercontent.com is blocked.
+var DefaultTrackersListURLs = []string{
+	"https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt",
+	"https://ngosang.github.io/trackerslist/trackers_best_ip.txt",
+	"https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best_ip.txt",
+	"https://raw.githack.com/ngosang/trackerslist/master/trackers_best_ip.txt",
+}
+
+// DefaultTrackersText is the initial value of BTSets.DefaultTrackers.
+const DefaultTrackersText = `http://retracker.local/announce
+http://bt4.t-ru.org/ann?magnet
+http://retracker.mgts.by:80/announce
+http://tracker.city9x.com:2710/announce
+http://tracker.electro-torrent.pl:80/announce
+http://tracker.internetwarriors.net:1337/announce
+http://tracker2.itzmx.com:6961/announce
+udp://opentor.org:2710
+udp://public.popcorn-tracker.org:6969/announce
+udp://tracker.opentrackr.org:1337/announce
+http://bt.svao-ix.ru/announce
+udp://explodie.org:6969/announce
+wss://tracker.btorrent.xyz
+wss://tracker.openwebtorrent.com`
 
 // btSets holds the live BitTorrent settings. It's an atomic pointer because it
 // is swapped at runtime (SetBTSets / SetDefaultConfig, e.g. from the settings
@@ -209,6 +240,8 @@ func SetDefaultConfig() {
 	sets.ConnectionsLimit = 50
 	sets.DHTConnectionsLimit = 500
 	sets.RetrackersMode = 1
+	sets.TrackersListURL = ""
+	sets.DefaultTrackers = DefaultTrackersText
 	sets.TorrentDisconnectTimeout = 30
 	sets.ReaderReadAHead = 95 // 95%
 	sets.ShowFSActiveTorr = true
@@ -257,6 +290,11 @@ func loadBTSets() {
 			if json.Unmarshal(buf, &raw) == nil {
 				if _, ok := raw["EnableBonjour"]; !ok {
 					sets.EnableBonjour = true
+				}
+				// Seed the local trackers list for configs that predate it. Keyed
+				// on the field's absence so a list the user cleared stays empty.
+				if _, ok := raw["DefaultTrackers"]; !ok {
+					sets.DefaultTrackers = DefaultTrackersText
 				}
 			}
 			StoreBTsets(sets)

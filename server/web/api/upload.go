@@ -35,7 +35,7 @@ import (
 func torrentUpload(c *gin.Context) {
 	form, err := c.MultipartForm()
 	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, err)
+		abortWithJSONError(c, http.StatusBadRequest, err)
 		return
 	}
 	defer form.RemoveAll()

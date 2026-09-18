@@ -205,7 +205,15 @@
     "UseIINA": "Подкана за отваряне на видео в IINA",
     "UseIINAHint": "Добави бутон към IINA плеъра за списъка с торенти (само macOS)",
     "ViewedHistoryStorage": "Съхранение на историята на прегледите:",
-    "ViewedStorageHint": "Изберете къде да съхранявате историята на прегледите"
+    "ViewedStorageHint": "Изберете къде да съхранявате историята на прегледите",
+    "MergeAllM3U": "Комбиниране на M3U плейлисти",
+    "MergeAllM3UHint": "Всички файлове се показват в един плейлист (http://host:port/playlistall/all.m3u), вместо отделен плейлист за всеки торент.",
+    "TrackersListURL": "Собствен URL на списък с тракери",
+    "TrackersListURLHint": "Незадължителен URL към собствен списък. Оставете празно, за да се използват вградените ngosang огледала. Ако е зададен, се опитва първо, след това огледалата. Ако всички отдалечени изтегляния са неуспешни, се използват локалните тракери по подразбиране.",
+    "DefaultTrackers": "Тракери по подразбиране",
+    "DefaultTrackersHint": "Локални announce URL адреси, по един на ред. Използват се самостоятелно, ако всички отдалечени изтегляния са неуспешни, или се добавят след успешно зареждане на отдалечения списък.",
+    "ShowQuickVLCButton": "Show VLC button on torrent cards",
+    "ShowQuickVLCButtonHint": "Optional shortcut for single-video torrents. VLC must also be enabled."
   },
   "Size": "Размер",
   "SpeedTest": "Тест на скоростта",
@@ -329,6 +337,8 @@
     "TempFS": "Enable file buffer for source stream",
     "TempFSHint": "Creates a temporary gst-XXXXXX ring buffer in the TorrServer working directory. Helps smooth speed drops on weak torrents; SSD storage is recommended.",
     "TempFSRing": "Additional stream buffer",
-    "TempFSRingHint": "0 = base buffer around 90 seconds. Each unit adds roughly 30 seconds; 10 adds about 300 seconds."
+    "TempFSRingHint": "0 = base buffer around 90 seconds. Each unit adds roughly 30 seconds; 10 adds about 300 seconds.",
+    "AudioTrack": "Аудио писта",
+    "X264Ultrafast": "Use x264 ultrafast preset"
   }
 }

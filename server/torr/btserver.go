@@ -47,6 +47,10 @@ func NewBTS() *BTServer {
 // Connect builds the libtorrent session from current BTsets and starts
 // the alert pump. Safe to call after Disconnect.
 func (bt *BTServer) Connect() error {
+	// Warm the remote trackers list in the background so torrents added right
+	// after start already get it; adding never waits for the download.
+	utils.PrefetchTrackers()
+
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
 	if bt.session != nil {

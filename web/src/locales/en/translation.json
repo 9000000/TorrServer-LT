@@ -233,7 +233,15 @@
     "UseIINA": "Prompt to open video in IINA",
     "UseIINAHint": "Add IINA player button to torrent content list (macOS only)",
     "ViewedHistoryStorage": "Viewed History Storage:",
-    "ViewedStorageHint": "Choose where to store viewed history"
+    "ViewedStorageHint": "Choose where to store viewed history",
+    "MergeAllM3U": "Combine M3U playlists",
+    "MergeAllM3UHint": "Lists all files in one (http://host:port/playlistall/all.m3u) playlist instead of a separate playlist for each torrent.",
+    "TrackersListURL": "Custom remote trackers list URL",
+    "TrackersListURLHint": "Optional custom list URL. Leave empty to use built-in ngosang mirrors. If set, it is tried first, then the mirrors. If all remote fetches fail, local Default Trackers are used.",
+    "DefaultTrackers": "Default trackers",
+    "DefaultTrackersHint": "Local announce URLs, one per line. Used alone when all remote fetches fail, or merged after a successful remote fetch.",
+    "ShowQuickVLCButton": "Show VLC button on torrent cards",
+    "ShowQuickVLCButtonHint": "Optional shortcut for single-video torrents. VLC must also be enabled."
   },
   "Size": "Size",
   "SpeedTest": "Speed Test",

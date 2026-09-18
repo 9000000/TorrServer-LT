@@ -222,6 +222,20 @@ docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/trinit
 - `TS_LOG_PATH` - for overriding log path. Example `/opt/torrserver.log`
 - `TS_PROXYURL` - set proxy URL for BitTorrent traffic (http, socks4, socks5, socks5h), example: socks5h://user:password@example.com:2080
 - `TS_PROXYMODE` - set proxy mode: "tracker" (only HTTP trackers, default), "peers" (only peer connections), or "full" (all traffic)
+- `TS_IP` - web server bind address (`--ip`)
+- `TS_TORR_ADDR` - torrent client address (`--torrentaddr`)
+- `TS_WEB_LOG_PATH` - web access log path (`--weblogpath`)
+- `TS_SSL_ENABLE` - if 1, enables HTTPS (`--ssl`); the old name `TS_EN_SSL` still works
+- `TS_SSL_PORT` - HTTPS port (`--sslport`)
+- `TS_SSL_CERT_PATH` / `TS_SSL_KEY_PATH` - SSL certificate and key files (`--sslcert` / `--sslkey`)
+- `TS_FORCE_HTTPS_ENABLE` - if 1, redirects HTTP to HTTPS (`--force-https`)
+- `TS_SEARCH_WA_ENABLE` - if 1, search without auth (`--searchwa`)
+- `TS_STREAM_WA_ENABLE` - if 1, stream/play and M3U without auth (`--streamwa`)
+- `TS_WEBDAV_ENABLE` - if 1, enables WebDAV (`--webdav`)
+- `TS_PUBLIC_IPV4_ADDR` / `TS_PUBLIC_IPV6_ADDR` - public IP addresses (`--pubipv4` / `--pubipv6`)
+- `TS_MAX_SIZE` - max allowed stream size in bytes (`--maxsize`)
+- `TS_TELEGRAM_TOKEN` - Telegram bot token (`--tgtoken`)
+- `TS_FUSE_PATH` - FUSE mount path (`--fusepath`); the container needs `/dev/fuse` and `SYS_ADMIN`
 
 Example with full overrided command (on default values):
 
@@ -455,6 +469,30 @@ The users data file should be located near to the settings. Basic auth, read mor
 ```
 
 Note: You should enable authentication with -a (--httpauth) TorrServer startup option.
+
+## Retrackers
+
+When adding a torrent, TorrServer can modify its announce trackers according to **Settings → Additional → Retrackers**:
+
+| Mode | Behavior |
+|------|----------|
+| Don't add | Leave magnet/file trackers unchanged |
+| Add (default) | Append the default/remote list |
+| Remove | Clear trackers from the torrent |
+| Replace | Replace them with the default/remote list |
+
+Related settings (same Web UI section, also via `POST /settings`):
+
+- **`TrackersListURL`** — optional custom remote list URL. Leave it **empty** to use the built-in ngosang `trackers_best_ip.txt` mirrors, tried in order:
+  1. `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt`
+  2. `https://ngosang.github.io/trackerslist/trackers_best_ip.txt`
+  3. `https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best_ip.txt`
+  4. `https://raw.githack.com/ngosang/trackerslist/master/trackers_best_ip.txt`
+
+  A custom URL is tried **first**, then the mirrors. Each fetch times out after 5 s and falls back to the next URL, and to `DefaultTrackers` when all of them fail. The list is fetched in the background at start and refreshed every 12 hours; adding a torrent never waits for it.
+- **`DefaultTrackers`** — local announce URLs, one per line (`udp`/`http`/`https`/`wss`; `#` starts a comment). Used alone when every remote fetch fails, otherwise appended after the remote list.
+
+Optional file overlay (always appended when present): put `trackers.txt` in the config directory (`--path` / `-d`), next to `config.db`. Only lines starting with `udp` or `http` are read from that file.
 
 ## Whitelist/Blacklist IP
 

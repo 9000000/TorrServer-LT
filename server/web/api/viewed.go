@@ -38,7 +38,7 @@ func viewed(c *gin.Context) {
 	var req viewedReqJS
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, err)
+		abortWithJSONError(c, http.StatusBadRequest, err)
 		return
 	}
 
@@ -52,7 +52,7 @@ func viewed(c *gin.Context) {
 	case "set":
 		{
 			if req.Hash == "" {
-				c.AbortWithError(http.StatusBadRequest, errEmptyHash)
+				abortWithJSONError(c, http.StatusBadRequest, errEmptyHash)
 				return
 			}
 			setViewed(req, c)
@@ -60,7 +60,7 @@ func viewed(c *gin.Context) {
 	case "rem":
 		{
 			if req.Hash == "" {
-				c.AbortWithError(http.StatusBadRequest, errEmptyHash)
+				abortWithJSONError(c, http.StatusBadRequest, errEmptyHash)
 				return
 			}
 			remViewed(req, c)
