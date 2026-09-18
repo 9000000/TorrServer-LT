@@ -130,11 +130,11 @@ var Staticjs2ccd0d851chunkjsLICENSEtxt []byte
 //go:embed pages/static/js/2.ccd0d851.chunk.js.map
 var Staticjs2ccd0d851chunkjsmap []byte
 
-//go:embed pages/static/js/main.c7b351f4.chunk.js
-var Staticjsmainc7b351f4chunkjs []byte
+//go:embed pages/static/js/main.c889017c.chunk.js
+var Staticjsmainc889017cchunkjs []byte
 
-//go:embed pages/static/js/main.c7b351f4.chunk.js.map
-var Staticjsmainc7b351f4chunkjsmap []byte
+//go:embed pages/static/js/main.c889017c.chunk.js.map
+var Staticjsmainc889017cchunkjsmap []byte
 
 //go:embed pages/static/js/runtime-main.5ed86a79.js
 var Staticjsruntimemain5ed86a79js []byte

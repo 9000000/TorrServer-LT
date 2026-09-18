@@ -91,6 +91,26 @@
                 }
             }
         },
+        "/ffp/status": {
+            "get": {
+                "description": "Reports whether the ffprobe binary is available. Features that need the real\nmedia duration (e.g. saving the playback position) work only when it is.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "ffprobe availability",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.ffprobeStatusResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/ffp/{hash}/{id}": {
             "get": {
                 "description": "Gather informations using ffprobe.",
@@ -120,6 +140,511 @@
                 "responses": {
                     "200": {
                         "description": "Data returned from ffprobe"
+                    }
+                }
+            }
+        },
+        "/gst/echo": {
+            "get": {
+                "description": "Requires a `-gst` build. Not available in standard binaries.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "GStreamer health check",
+                "responses": {
+                    "200": {
+                        "description": "GStreamer runtime status",
+                        "schema": {
+                            "$ref": "#/definitions/api.gstreamerEchoDocResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/gst/remove": {
+            "get": {
+                "description": "Requires a `-gst` build. Not available in standard binaries.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "Stop GStreamer transcode task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash (alias)",
+                        "name": "id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Task removed",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "boolean"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid identifier",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Task not found"
+                    }
+                }
+            }
+        },
+        "/gst/settings": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "On `-gst` builds returns built_in, config and defaults. On standard builds returns built_in: false only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "Get GStreamer configuration",
+                "responses": {
+                    "200": {
+                        "description": "GStreamer settings",
+                        "schema": {
+                            "$ref": "#/definitions/api.gstreamerSettingsDocResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Available on `-gst` builds only; standard builds return 404.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "Update GStreamer configuration",
+                "parameters": [
+                    {
+                        "description": "GStreamer settings request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.gstreamerSettingsDocRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Update successful",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid input data",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Read-only mode",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "GStreamer is not built in",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/gst/{hash}/heartbeat": {
+            "get": {
+                "description": "Requires a `-gst` build. Not available in standard binaries.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "GStreamer task heartbeat",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Torrent heartbeat state",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Task not found"
+                    }
+                }
+            }
+        },
+        "/gst/{hash}/init.mp4": {
+            "get": {
+                "description": "Requires a `-gst` build. Returns the fMP4 init segment for the transcode session.",
+                "produces": [
+                    "video/mp4"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "HLS initialization segment",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Audio track index",
+                        "name": "audio",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Start offset in seconds",
+                        "name": "seconds",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "video/mp4 init segment",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "404": {
+                        "description": "Task not found"
+                    },
+                    "502": {
+                        "description": "Pipeline error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/gst/{hash}/master.m3u8": {
+            "get": {
+                "description": "Requires a `-gst` build. Returns an HLS VOD master playlist for transcoded playback.",
+                "produces": [
+                    "application/vnd.apple.mpegurl"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "HLS master playlist",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "File index in torrent",
+                        "name": "index",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "File index (alias)",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "File index (alias)",
+                        "name": "fileID",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Audio track index",
+                        "name": "audio",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Start offset in seconds",
+                        "name": "seconds",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "application/vnd.apple.mpegurl playlist",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "502": {
+                        "description": "Pipeline error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/gst/{hash}/probe": {
+            "get": {
+                "description": "Requires a `-gst` build. Uses gst-discoverer to inspect container and codec information.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "Probe torrent media tracks",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "File index in torrent",
+                        "name": "index",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "File index (alias)",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "File index (alias)",
+                        "name": "fileID",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Media probe result",
+                        "schema": {
+                            "$ref": "#/definitions/api.gstreamerProbeInfoDoc"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid source",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "502": {
+                        "description": "Probe failed",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "504": {
+                        "description": "Probe timed out",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/gst/{hash}/seg/{segment}": {
+            "get": {
+                "description": "Requires a `-gst` build. Returns an fMP4 media segment for HLS playback.",
+                "produces": [
+                    "video/mp4"
+                ],
+                "tags": [
+                    "GStreamer"
+                ],
+                "summary": "HLS media segment",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Segment index (e.g. 0.m4s)",
+                        "name": "segment",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Audio track index",
+                        "name": "audio",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "video/mp4 media segment",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "206": {
+                        "description": "Partial content",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid segment",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Task not found"
+                    },
+                    "502": {
+                        "description": "Pipeline error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/jacred/search": {
+            "get": {
+                "description": "Searches the configured JacRed aggregator.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "Makes a JacRed search",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "JacRed query",
+                        "name": "query",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "JacRed torrent search result(s)",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.TorrentDetails"
+                            }
+                        }
                     }
                 }
             }
@@ -197,6 +722,12 @@
                         "description": "From last play file",
                         "name": "fromlast",
                         "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Start the playlist at this file id (overrides fromlast)",
+                        "name": "index",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -224,6 +755,31 @@
                         "description": "OK",
                         "schema": {
                             "type": "file"
+                        }
+                    }
+                }
+            }
+        },
+        "/runtime/status": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Read-only flags for DLNA/Bonjour/WebDAV/FUSE plus structured BT stats (and raw /stat text).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "Runtime integration + BitTorrent status",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.RuntimeStatus"
                         }
                     }
                 }
@@ -670,6 +1226,35 @@
                 }
             }
         },
+        "/torznab/caps": {
+            "get": {
+                "description": "Returns the categories and limits advertised by a configured indexer.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "Fetch torznab indexer capabilities",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Indexer index in the configured list",
+                        "name": "index",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Indexer capabilities",
+                        "schema": {
+                            "$ref": "#/definitions/api.torznabCapsResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/torznab/search": {
             "get": {
                 "description": "Makes a torznab search.",
@@ -687,6 +1272,30 @@
                         "name": "query",
                         "in": "query",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Indexer index (-1 = all configured)",
+                        "name": "index",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Torznab categories, comma-separated (default 5000,2000 = TV+Movies)",
+                        "name": "cat",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Result offset for pagination",
+                        "name": "offset",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Max results (default 100, capped at 250)",
+                        "name": "limit",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -738,9 +1347,150 @@
                     }
                 }
             }
+        },
+        "/waf": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Returns whitelist/blacklist IP and blocked referer lists stored in settings.json, plus the built-in referer denylist and whether it is enforced.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "Get HTTP WAF lists",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.wafResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "description": "Fully replaces whitelist/blacklist IP and blocked referer lists in settings.json and hot-reloads the WAF. All three lists are required; explicit empty strings clear a list. default_referers_enabled is optional and switches the built-in referer denylist.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "Update HTTP WAF lists",
+                "parameters": [
+                    {
+                        "description": "Complete WAF configuration",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.wafUpdateReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.wafResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
+        "api.RuntimeStatus": {
+            "type": "object",
+            "properties": {
+                "bonjour_enabled": {
+                    "type": "boolean"
+                },
+                "bt": {
+                    "description": "BitTorrent client (structured alternative to plaintext GET /stat).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/torr.ClientStatusSnapshot"
+                        }
+                    ]
+                },
+                "dlna_enabled": {
+                    "type": "boolean"
+                },
+                "friendly_name": {
+                    "type": "string"
+                },
+                "fuse_enabled": {
+                    "type": "boolean"
+                },
+                "fuse_path": {
+                    "type": "string"
+                },
+                "webdav_enabled": {
+                    "type": "boolean"
+                },
+                "webdav_path": {
+                    "type": "string"
+                }
+            }
+        },
         "api.cacheReqJS": {
             "type": "object",
             "properties": {
@@ -749,6 +1499,128 @@
                 },
                 "hash": {
                     "type": "string"
+                }
+            }
+        },
+        "api.ffprobeStatusResponse": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "api.gstreamerComponentDocStatus": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "type": "boolean"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "found": {
+                    "type": "boolean"
+                },
+                "works": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "api.gstreamerEchoDocResponse": {
+            "type": "object",
+            "properties": {
+                "gst_discoverer": {
+                    "$ref": "#/definitions/api.gstreamerComponentDocStatus"
+                },
+                "gstreamer": {
+                    "$ref": "#/definitions/api.gstreamerComponentDocStatus"
+                }
+            }
+        },
+        "api.gstreamerProbeInfoDoc": {
+            "type": "object",
+            "properties": {
+                "Container": {
+                    "type": "string"
+                },
+                "DurationNS": {
+                    "type": "integer"
+                },
+                "FileSize": {
+                    "type": "integer"
+                },
+                "Tracks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.gstreamerTrackDoc"
+                    }
+                }
+            }
+        },
+        "api.gstreamerSettingsDocRequest": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string"
+                },
+                "config": {
+                    "type": "object",
+                    "additionalProperties": {}
+                }
+            }
+        },
+        "api.gstreamerSettingsDocResponse": {
+            "type": "object",
+            "properties": {
+                "built_in": {
+                    "type": "boolean"
+                },
+                "config": {},
+                "defaults": {}
+            }
+        },
+        "api.gstreamerTrackDoc": {
+            "type": "object",
+            "properties": {
+                "CapsName": {
+                    "type": "string"
+                },
+                "Channels": {
+                    "type": "integer"
+                },
+                "Codec": {
+                    "type": "string"
+                },
+                "FrameRateDen": {
+                    "type": "integer"
+                },
+                "FrameRateNum": {
+                    "type": "integer"
+                },
+                "Height": {
+                    "type": "integer"
+                },
+                "Index": {
+                    "type": "integer"
+                },
+                "Language": {
+                    "type": "string"
+                },
+                "PadName": {
+                    "type": "string"
+                },
+                "Rate": {
+                    "type": "integer"
+                },
+                "Title": {
+                    "type": "string"
+                },
+                "Type": {
+                    "type": "string"
+                },
+                "Width": {
+                    "type": "integer"
                 }
             }
         },
@@ -792,6 +1664,45 @@
                 }
             }
         },
+        "api.torznabCapsCategory": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "subcategories": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.torznabCapsCategory"
+                    }
+                }
+            }
+        },
+        "api.torznabCapsResponse": {
+            "type": "object",
+            "properties": {
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.torznabCapsCategory"
+                    }
+                },
+                "limits": {
+                    "type": "object",
+                    "properties": {
+                        "default": {
+                            "type": "integer"
+                        },
+                        "max": {
+                            "type": "integer"
+                        }
+                    }
+                }
+            }
+        },
         "api.viewedReqJS": {
             "type": "object",
             "properties": {
@@ -802,6 +1713,70 @@
                     "type": "integer"
                 },
                 "hash": {
+                    "type": "string"
+                },
+                "timecode": {
+                    "type": "number"
+                }
+            }
+        },
+        "api.wafResponse": {
+            "type": "object",
+            "properties": {
+                "blacklist": {
+                    "type": "string"
+                },
+                "default_referers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "default_referers_enabled": {
+                    "type": "boolean"
+                },
+                "ip_enabled": {
+                    "type": "boolean"
+                },
+                "read_only": {
+                    "type": "boolean"
+                },
+                "referer_enabled": {
+                    "type": "boolean"
+                },
+                "referers": {
+                    "type": "string"
+                },
+                "warnings": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/waf.Warning"
+                    }
+                },
+                "whitelist": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.wafUpdateReq": {
+            "type": "object",
+            "required": [
+                "blacklist",
+                "referers",
+                "whitelist"
+            ],
+            "properties": {
+                "blacklist": {
+                    "type": "string"
+                },
+                "default_referers_enabled": {
+                    "description": "Optional: omitted keeps the current state of the built-in denylist.",
+                    "type": "boolean"
+                },
+                "referers": {
+                    "type": "string"
+                },
+                "whitelist": {
                     "type": "string"
                 }
             }
@@ -873,7 +1848,19 @@
                 "connectionsLimit": {
                     "type": "integer"
                 },
+                "defaultTrackers": {
+                    "description": "newline-separated announce URLs: the local list, merged after the remote one and used alone when it can't be fetched",
+                    "type": "string"
+                },
+                "dhtconnectionsLimit": {
+                    "description": "DHTConnectionsLimit caps DHT peer storage — libtorrent's dht_max_peers\n(max peers kept per torrent in the DHT), def 500. Keeps DHT from holding\nan unbounded number of peer endpoints.",
+                    "type": "integer"
+                },
                 "disableDHT": {
+                    "type": "boolean"
+                },
+                "disableEndGame": {
+                    "description": "turn off libtorrent strict_end_game_mode (def off = end-game on)",
                     "type": "boolean"
                 },
                 "disablePEX": {
@@ -895,6 +1882,10 @@
                     "description": "in kb, 0 - inf",
                     "type": "integer"
                 },
+                "enableBonjour": {
+                    "description": "Bonjour/mDNS LAN discovery (_torrserver, _http, _https); shares FriendlyName.",
+                    "type": "boolean"
+                },
                 "enableDLNA": {
                     "description": "DLNA",
                     "type": "boolean"
@@ -905,6 +1896,10 @@
                 },
                 "enableIPv6": {
                     "description": "BT Config",
+                    "type": "boolean"
+                },
+                "enableJacRedSearch": {
+                    "description": "JacRed (single self-aggregating server: URL + optional API key)",
                     "type": "boolean"
                 },
                 "enableLPD": {
@@ -926,7 +1921,18 @@
                 "friendlyName": {
                     "type": "string"
                 },
-                "lpdipv6": {
+                "jacRedKey": {
+                    "type": "string"
+                },
+                "jacRedUrl": {
+                    "type": "string"
+                },
+                "mergeAllM3U": {
+                    "description": "M3U",
+                    "type": "boolean"
+                },
+                "padTailPartial": {
+                    "description": "PadTailPartial: when the file's LAST piece is a SHORT partial (smaller than a\nfull piece AND under 5 MB), pin one EXTRA piece at the tail. A short last piece\notherwise leaves the cache a near-full-piece short of CacheSize (e.g. 8 MB pieces\nwith a 1 MB final piece cap the cache at 57 MB instead of 64); the extra pinned\npiece fills that slack. Off by default — it lets the resident set run up to one\npiece over CacheSize.",
                     "type": "boolean"
                 },
                 "peersListenPort": {
@@ -941,10 +1947,6 @@
                     "type": "integer"
                 },
                 "removeCacheOnDrop": {
-                    "type": "boolean"
-                },
-                "responsiveMode": {
-                    "description": "Reader",
                     "type": "boolean"
                 },
                 "retrackersMode": {
@@ -991,6 +1993,21 @@
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/settings.TorznabConfig"
+                    }
+                },
+                "trackTimecode": {
+                    "description": "Viewed timecodes",
+                    "type": "boolean"
+                },
+                "trackersListURL": {
+                    "description": "optional custom remote trackers list URL, tried before the built-in mirrors; empty = mirrors only",
+                    "type": "string"
+                },
+                "trustedProxies": {
+                    "description": "Reverse proxy\nTrustedProxies lists the reverse proxies (CIDRs like \"192.168.0.0/16\" or\nbare IPs) whose X-Forwarded-For / X-Real-IP header is honoured to recover\nthe real client IP for per-device cache grouping (see torr.streamGroupKey),\nso clients behind a proxy aren't all collapsed into one cache window. Empty\n= trust loopback + private LAN ranges (proxy on the same host/LAN), which\ncovers the usual home setup; set explicit entries to harden against a\nspoofed header from an untrusted client.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
                     }
                 },
                 "uploadRateLimit": {
@@ -1046,6 +2063,9 @@
                 },
                 "hash": {
                     "type": "string"
+                },
+                "timecode": {
+                    "type": "number"
                 }
             }
         },
@@ -1266,6 +2286,117 @@
                 },
                 "upload_speed": {
                     "type": "number"
+                }
+            }
+        },
+        "torr.ClientStatusSnapshot": {
+            "type": "object",
+            "properties": {
+                "active_peers": {
+                    "type": "integer"
+                },
+                "active_streams": {
+                    "type": "integer"
+                },
+                "bytes_read": {
+                    "type": "integer"
+                },
+                "bytes_written": {
+                    "type": "integer"
+                },
+                "connected_seeders": {
+                    "type": "integer"
+                },
+                "download_speed": {
+                    "type": "number"
+                },
+                "listen_port": {
+                    "type": "integer"
+                },
+                "loaded_size": {
+                    "type": "integer"
+                },
+                "raw_stat": {
+                    "type": "string"
+                },
+                "torrent_count": {
+                    "type": "integer"
+                },
+                "torrents": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/torr.TorrentStatusBrief"
+                    }
+                },
+                "total_peers": {
+                    "type": "integer"
+                },
+                "total_size": {
+                    "type": "integer"
+                },
+                "upload_speed": {
+                    "type": "number"
+                }
+            }
+        },
+        "torr.TorrentStatusBrief": {
+            "type": "object",
+            "properties": {
+                "active_peers": {
+                    "type": "integer"
+                },
+                "connected_seeders": {
+                    "type": "integer"
+                },
+                "download_speed": {
+                    "type": "number"
+                },
+                "hash": {
+                    "type": "string"
+                },
+                "loaded_size": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "preload_size": {
+                    "type": "integer"
+                },
+                "preloaded_bytes": {
+                    "type": "integer"
+                },
+                "stat": {
+                    "type": "integer"
+                },
+                "stat_string": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "torrent_size": {
+                    "type": "integer"
+                },
+                "total_peers": {
+                    "type": "integer"
+                },
+                "upload_speed": {
+                    "type": "number"
+                }
+            }
+        },
+        "waf.Warning": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "line": {
+                    "type": "integer"
+                },
+                "list": {
+                    "type": "string"
                 }
             }
         }
