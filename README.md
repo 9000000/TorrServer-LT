@@ -35,6 +35,8 @@ The difference from upstream is the underlying torrent engine: `arvidn/libtorren
 - Cross-browser modern web interface
 - Optional DLNA server (with category folders)
 - Optional GStreamer HLS transcoding (`-gst` builds; audio AC3/EAC3/DTS → AAC for players without those decoders)
+- Native [MCP](server/mcp/README.md) server for AI agents (OpenClaw, Hermes, and other MCP clients)
+- HTTP access WAF (IP white/blacklist, Referer/Origin blocking)
 
 ## Getting Started
 
@@ -213,7 +215,7 @@ docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/trinit
 
 #### Environments
 
-- `TS_HTTPAUTH` - 1, and place auth file into `~/ts/config` folder for enabling basic auth
+- `TS_HTTPAUTH` - 1, and place auth file into `~/ts/config` folder for enabling basic auth (also protects the MCP endpoint `/mcp`)
 - `TS_RDB` - if 1, then the enabling `--rdb` flag
 - `TS_DONTKILL` - if 1, then the enabling `--dontkill` flag
 - `TS_PORT` - for changind default port to **5555** (example), also u need to change `-p 8090:8090` to `-p 5555:5555` (example)
@@ -454,6 +456,43 @@ swag fmt   # lint/format the annotations
 ### API Docs
 
 API documentation is hosted as Swagger format available at path `/swagger/index.html`.
+
+### MCP (AI agents)
+
+TorrServer exposes a native [Model Context Protocol](https://modelcontextprotocol.io/) server at **`/mcp`** on the same HTTP(S) port as the web UI (default `8090`). OpenClaw, Hermes, and other MCP clients can list, add, and manage torrents, and get a play URL for the next unwatched TV episode. The REST API is unchanged.
+
+Endpoint: `http://<host>:8090/mcp` (or `https://` when `--ssl` is enabled).
+
+When HTTP auth is on (`-a` / `TS_HTTPAUTH=1`), MCP uses the same Basic credentials as the rest of the API (`accs.db`). Play links returned by tools are ordinary HTTP URLs for VLC, mpv, or a browser.
+
+**OpenClaw** (`openclaw.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "torrserver": {
+        "url": "http://127.0.0.1:8090/mcp",
+        "transport": "streamable-http"
+      }
+    }
+  }
+}
+```
+
+With auth, add `"headers": { "Authorization": "Basic <base64-user-pass>" }`.
+
+**Hermes** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  torrserver:
+    url: "http://127.0.0.1:8090/mcp"
+    headers:
+      Authorization: "Basic <base64-user-pass>"
+```
+
+See [server/mcp/README.md](server/mcp/README.md) for the tool list and next-unwatched behavior.
 
 ## Authentication
 
