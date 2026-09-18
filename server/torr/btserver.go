@@ -571,7 +571,7 @@ func applyProxyConfig(cfg lt.SessionConfig) {
 	cfg["proxy_peer_connections"] = peer
 }
 
-// ReloadIPFilter re-reads bip.txt/wip.txt from disk and pushes the new
+// ReloadIPFilter re-reads the data dir's `blocklist` file and pushes the new
 // filter into the live session. Safe no-op when no session is running.
 func (bt *BTServer) ReloadIPFilter() error {
 	bt.mu.Lock()

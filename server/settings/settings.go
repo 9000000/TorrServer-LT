@@ -85,6 +85,10 @@ func InitSets(readOnly, searchWA, streamWA bool) {
 	// Migrate old torrents
 	MigrateTorrents()
 
+	// One-shot import of the legacy wip.txt/bip.txt HTTP ACL files into the
+	// waf object of settings.json (the files are renamed to *.bak).
+	MigrateWAFLists()
+
 	logConfiguration(settingsStoragePref, viewedStoragePref)
 }
 
