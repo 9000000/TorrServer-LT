@@ -109,6 +109,7 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	// HTTP / DLNA headers.
 	// Do not force Connection: close — let the player use HTTP keep-alive
 	// for smoother streaming (VLC, MX Player benefit from persistent connections).
+	resp.Header().Set("Connection", "close")
 	resp.Header().Set("Server", "TorrServer (Portable SDK for UPnP devices)")
 	resp.Header().Set("transferMode.dlna.org", "Streaming")
 
