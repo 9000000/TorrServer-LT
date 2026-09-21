@@ -37,8 +37,8 @@ type TorznabItem struct {
 	Description string             `xml:"description"`
 	PubDate     string             `xml:"pubDate"`
 	Size        int64              `xml:"size"`
-	Indexer     string             `xml:"jackettindexer"`
-	Prowlarr    string             `xml:"prowlarrindexer"`
+	Jackett     string             `xml:"jackettindexer"`  // source tracker behind a Jackett aggregate
+	Prowlarr    string             `xml:"prowlarrindexer"` // same for Prowlarr
 	Enclosure   []TorznabEnclosure `xml:"enclosure"`
 	Attributes  []TorznabAttribute `xml:"attr"`
 }
@@ -144,6 +144,19 @@ func Search(ctx context.Context, query string, index int, cat string, offset, li
 	return allResults
 }
 
+// itemTracker names the tracker a result came from. Jackett and Prowlarr tag
+// every item with its real source indexer, which matters most on their
+// aggregate endpoints, where the configured label would name only the proxy.
+func itemTracker(item TorznabItem, label string) string {
+	if name := strings.TrimSpace(item.Jackett); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(item.Prowlarr); name != "" {
+		return name
+	}
+	return label
+}
+
 // indexerLabel picks a short, human-readable source name for a configured indexer — the
 // custom Name if the user set one, otherwise the host's bare domain (searching several
 // indexers at once via index=-1 merges results, so the UI needs a way to tell them apart).
@@ -216,19 +229,12 @@ func searchOne(ctx context.Context, host, key, query, label, cat string, offset,
 
 	var results []*models.TorrentDetails
 	for _, item := range torznabResp.Channel.Items {
-		tracker := label
-		if item.Indexer != "" {
-			tracker = item.Indexer
-		} else if item.Prowlarr != "" {
-			tracker = item.Prowlarr
-		}
-
 		detail := &models.TorrentDetails{
 			Title:      item.Title,
 			Name:       item.Title,
 			Link:       item.Link,
 			CreateDate: parseDate(item.PubDate),
-			Tracker:    tracker,
+			Tracker:    itemTracker(item, label),
 		}
 
 		if len(item.Enclosure) > 0 {

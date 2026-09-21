@@ -1,6 +1,9 @@
 package torznab
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -59,5 +62,31 @@ func TestNormalizeHost(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSearchOneTakesTrackerFromIndexerTags(t *testing.T) {
+	const feed = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+<channel>
+<item><title>A</title><link>magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</link><jackettindexer id="rutracker">RuTracker.org</jackettindexer></item>
+<item><title>B</title><link>magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</link><prowlarrindexer id="7">Kinozal</prowlarrindexer></item>
+<item><title>C</title><link>magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc</link></item>
+</channel>
+</rss>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(feed))
+	}))
+	defer srv.Close()
+
+	got := searchOne(context.Background(), srv.URL, "key", "q", "Jackett", "", 0, 0)
+	want := []string{"RuTracker.org", "Kinozal", "Jackett"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d results, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Tracker != w {
+			t.Errorf("result %d tracker = %q, want %q", i, got[i].Tracker, w)
+		}
 	}
 }

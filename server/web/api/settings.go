@@ -38,7 +38,7 @@ func settings(c *gin.Context) {
 	var req setsReqJS
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, err)
+		abortWithJSONError(c, http.StatusBadRequest, err)
 		return
 	}
 
@@ -67,5 +67,5 @@ func settings(c *gin.Context) {
 		c.Status(200)
 		return
 	}
-	c.AbortWithError(http.StatusBadRequest, errors.New("action is empty"))
+	abortWithJSONError(c, http.StatusBadRequest, errors.New("action is empty"))
 }

@@ -29,10 +29,6 @@ type torrReqJS struct {
 	SaveToDB bool   `json:"save_to_db,omitempty"`
 }
 
-func abortWithJSONError(c *gin.Context, code int, err error) {
-	c.AbortWithStatusJSON(code, gin.H{"error": err.Error()})
-}
-
 // torrents godoc
 //
 //	@Summary		Handle torrents informations
@@ -84,8 +80,7 @@ func torrents(c *gin.Context) {
 		}
 	default:
 		{
-			abortWithJSONError(c, http.StatusBadRequest,
-				errors.Errorf("unknown action: %q", req.Action))
+			abortWithJSONError(c, http.StatusBadRequest, errors.Errorf("unknown action: %q", req.Action))
 		}
 	}
 }
@@ -174,7 +169,7 @@ func getTorrent(req torrReqJS, c *gin.Context) {
 		st := tor.Status()
 		c.JSON(200, st)
 	} else {
-		c.Status(http.StatusNotFound)
+		abortWithJSONError(c, http.StatusNotFound, errors.New("torrent not found"))
 	}
 }
 

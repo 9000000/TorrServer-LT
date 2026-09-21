@@ -1,11 +1,112 @@
 basePath: /
 definitions:
+  api.RuntimeStatus:
+    properties:
+      bonjour_enabled:
+        type: boolean
+      bt:
+        allOf:
+        - $ref: '#/definitions/torr.ClientStatusSnapshot'
+        description: BitTorrent client (structured alternative to plaintext GET /stat).
+      dlna_enabled:
+        type: boolean
+      friendly_name:
+        type: string
+      fuse_enabled:
+        type: boolean
+      fuse_path:
+        type: string
+      webdav_enabled:
+        type: boolean
+      webdav_path:
+        type: string
+    type: object
   api.cacheReqJS:
     properties:
       action:
         type: string
       hash:
         type: string
+    type: object
+  api.ffprobeStatusResponse:
+    properties:
+      available:
+        type: boolean
+    type: object
+  api.gstreamerComponentDocStatus:
+    properties:
+      available:
+        type: boolean
+      error:
+        type: string
+      found:
+        type: boolean
+      works:
+        type: boolean
+    type: object
+  api.gstreamerEchoDocResponse:
+    properties:
+      gst_discoverer:
+        $ref: '#/definitions/api.gstreamerComponentDocStatus'
+      gstreamer:
+        $ref: '#/definitions/api.gstreamerComponentDocStatus'
+    type: object
+  api.gstreamerProbeInfoDoc:
+    properties:
+      Container:
+        type: string
+      DurationNS:
+        type: integer
+      FileSize:
+        type: integer
+      Tracks:
+        items:
+          $ref: '#/definitions/api.gstreamerTrackDoc'
+        type: array
+    type: object
+  api.gstreamerSettingsDocRequest:
+    properties:
+      action:
+        type: string
+      config:
+        additionalProperties: {}
+        type: object
+    type: object
+  api.gstreamerSettingsDocResponse:
+    properties:
+      built_in:
+        type: boolean
+      config: {}
+      defaults: {}
+    type: object
+  api.gstreamerTrackDoc:
+    properties:
+      CapsName:
+        type: string
+      Channels:
+        type: integer
+      Codec:
+        type: string
+      FrameRateDen:
+        type: integer
+      FrameRateNum:
+        type: integer
+      Height:
+        type: integer
+      Index:
+        type: integer
+      Language:
+        type: string
+      PadName:
+        type: string
+      Rate:
+        type: integer
+      Title:
+        type: string
+      Type:
+        type: string
+      Width:
+        type: integer
     type: object
   api.setsReqJS:
     properties:
@@ -33,6 +134,31 @@ definitions:
       title:
         type: string
     type: object
+  api.torznabCapsCategory:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+      subcategories:
+        items:
+          $ref: '#/definitions/api.torznabCapsCategory'
+        type: array
+    type: object
+  api.torznabCapsResponse:
+    properties:
+      categories:
+        items:
+          $ref: '#/definitions/api.torznabCapsCategory'
+        type: array
+      limits:
+        properties:
+          default:
+            type: integer
+          max:
+            type: integer
+        type: object
+    type: object
   api.viewedReqJS:
     properties:
       action:
@@ -41,6 +167,49 @@ definitions:
         type: integer
       hash:
         type: string
+      timecode:
+        type: number
+    type: object
+  api.wafResponse:
+    properties:
+      blacklist:
+        type: string
+      default_referers:
+        items:
+          type: string
+        type: array
+      default_referers_enabled:
+        type: boolean
+      ip_enabled:
+        type: boolean
+      read_only:
+        type: boolean
+      referer_enabled:
+        type: boolean
+      referers:
+        type: string
+      warnings:
+        items:
+          $ref: '#/definitions/waf.Warning'
+        type: array
+      whitelist:
+        type: string
+    type: object
+  api.wafUpdateReq:
+    properties:
+      blacklist:
+        type: string
+      default_referers_enabled:
+        description: 'Optional: omitted keeps the current state of the built-in denylist.'
+        type: boolean
+      referers:
+        type: string
+      whitelist:
+        type: string
+    required:
+    - blacklist
+    - referers
+    - whitelist
     type: object
   models.TorrentDetails:
     properties:
@@ -87,7 +256,21 @@ definitions:
         type: integer
       connectionsLimit:
         type: integer
+      defaultTrackers:
+        description: 'newline-separated announce URLs: the local list, merged after
+          the remote one and used alone when it can''t be fetched'
+        type: string
+      dhtconnectionsLimit:
+        description: |-
+          DHTConnectionsLimit caps DHT peer storage — libtorrent's dht_max_peers
+          (max peers kept per torrent in the DHT), def 500. Keeps DHT from holding
+          an unbounded number of peer endpoints.
+        type: integer
       disableDHT:
+        type: boolean
+      disableEndGame:
+        description: turn off libtorrent strict_end_game_mode (def off = end-game
+          on)
         type: boolean
       disablePEX:
         type: boolean
@@ -102,6 +285,10 @@ definitions:
       downloadRateLimit:
         description: in kb, 0 - inf
         type: integer
+      enableBonjour:
+        description: Bonjour/mDNS LAN discovery (_torrserver, _http, _https); shares
+          FriendlyName.
+        type: boolean
       enableDLNA:
         description: DLNA
         type: boolean
@@ -110,6 +297,9 @@ definitions:
         type: boolean
       enableIPv6:
         description: BT Config
+        type: boolean
+      enableJacRedSearch:
+        description: 'JacRed (single self-aggregating server: URL + optional API key)'
         type: boolean
       enableLPD:
         description: LPD
@@ -125,7 +315,21 @@ definitions:
         type: boolean
       friendlyName:
         type: string
-      lpdipv6:
+      jacRedKey:
+        type: string
+      jacRedUrl:
+        type: string
+      mergeAllM3U:
+        description: M3U
+        type: boolean
+      padTailPartial:
+        description: |-
+          PadTailPartial: when the file's LAST piece is a SHORT partial (smaller than a
+          full piece AND under 5 MB), pin one EXTRA piece at the tail. A short last piece
+          otherwise leaves the cache a near-full-piece short of CacheSize (e.g. 8 MB pieces
+          with a 1 MB final piece cap the cache at 57 MB instead of 64); the extra pinned
+          piece fills that slack. Off by default — it lets the resident set run up to one
+          piece over CacheSize.
         type: boolean
       peersListenPort:
         type: integer
@@ -136,9 +340,6 @@ definitions:
         description: in percent, 5%-100%, [...S__X__E...] [S-E] not clean
         type: integer
       removeCacheOnDrop:
-        type: boolean
-      responsiveMode:
-        description: Reader
         type: boolean
       retrackersMode:
         description: 0 - don`t add, 1 - add retrackers (def), 2 - remove retrackers
@@ -171,6 +372,26 @@ definitions:
       torznabUrls:
         items:
           $ref: '#/definitions/settings.TorznabConfig'
+        type: array
+      trackTimecode:
+        description: Viewed timecodes
+        type: boolean
+      trackersListURL:
+        description: optional custom remote trackers list URL, tried before the built-in
+          mirrors; empty = mirrors only
+        type: string
+      trustedProxies:
+        description: |-
+          Reverse proxy
+          TrustedProxies lists the reverse proxies (CIDRs like "192.168.0.0/16" or
+          bare IPs) whose X-Forwarded-For / X-Real-IP header is honoured to recover
+          the real client IP for per-device cache grouping (see torr.streamGroupKey),
+          so clients behind a proxy aren't all collapsed into one cache window. Empty
+          = trust loopback + private LAN ranges (proxy on the same host/LAN), which
+          covers the usual home setup; set explicit entries to harden against a
+          spoofed header from an untrusted client.
+        items:
+          type: string
         type: array
       uploadRateLimit:
         description: in kb, 0 - inf
@@ -209,6 +430,8 @@ definitions:
         type: integer
       hash:
         type: string
+      timecode:
+        type: number
     type: object
   state.CacheState:
     properties:
@@ -360,6 +583,79 @@ definitions:
       upload_speed:
         type: number
     type: object
+  torr.ClientStatusSnapshot:
+    properties:
+      active_peers:
+        type: integer
+      active_streams:
+        type: integer
+      bytes_read:
+        type: integer
+      bytes_written:
+        type: integer
+      connected_seeders:
+        type: integer
+      download_speed:
+        type: number
+      listen_port:
+        type: integer
+      loaded_size:
+        type: integer
+      raw_stat:
+        type: string
+      torrent_count:
+        type: integer
+      torrents:
+        items:
+          $ref: '#/definitions/torr.TorrentStatusBrief'
+        type: array
+      total_peers:
+        type: integer
+      total_size:
+        type: integer
+      upload_speed:
+        type: number
+    type: object
+  torr.TorrentStatusBrief:
+    properties:
+      active_peers:
+        type: integer
+      connected_seeders:
+        type: integer
+      download_speed:
+        type: number
+      hash:
+        type: string
+      loaded_size:
+        type: integer
+      name:
+        type: string
+      preload_size:
+        type: integer
+      preloaded_bytes:
+        type: integer
+      stat:
+        type: integer
+      stat_string:
+        type: string
+      title:
+        type: string
+      torrent_size:
+        type: integer
+      total_peers:
+        type: integer
+      upload_speed:
+        type: number
+    type: object
+  waf.Warning:
+    properties:
+      code:
+        type: string
+      line:
+        type: integer
+      list:
+        type: string
+    type: object
 externalDocs:
   description: OpenAPI
   url: https://swagger.io/resources/open-api/
@@ -445,6 +741,358 @@ paths:
       summary: Gather informations using ffprobe
       tags:
       - API
+  /ffp/status:
+    get:
+      description: |-
+        Reports whether the ffprobe binary is available. Features that need the real
+        media duration (e.g. saving the playback position) work only when it is.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ffprobeStatusResponse'
+      summary: ffprobe availability
+      tags:
+      - API
+  /gst/{hash}/heartbeat:
+    get:
+      description: Requires a `-gst` build. Not available in standard binaries.
+      parameters:
+      - description: Torrent infohash
+        in: path
+        name: hash
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Torrent heartbeat state
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Task not found
+      summary: GStreamer task heartbeat
+      tags:
+      - GStreamer
+  /gst/{hash}/init.mp4:
+    get:
+      description: Requires a `-gst` build. Returns the fMP4 init segment for the
+        transcode session.
+      parameters:
+      - description: Torrent infohash
+        in: path
+        name: hash
+        required: true
+        type: string
+      - description: Audio track index
+        in: query
+        name: audio
+        type: integer
+      - default: 0
+        description: Start offset in seconds
+        in: query
+        name: seconds
+        type: integer
+      produces:
+      - video/mp4
+      responses:
+        "200":
+          description: video/mp4 init segment
+          schema:
+            type: file
+        "404":
+          description: Task not found
+        "502":
+          description: Pipeline error
+          schema:
+            type: string
+      summary: HLS initialization segment
+      tags:
+      - GStreamer
+  /gst/{hash}/master.m3u8:
+    get:
+      description: Requires a `-gst` build. Returns an HLS VOD master playlist for
+        transcoded playback.
+      parameters:
+      - description: Torrent infohash
+        in: path
+        name: hash
+        required: true
+        type: string
+      - description: File index in torrent
+        in: query
+        name: index
+        type: string
+      - description: File index (alias)
+        in: query
+        name: id
+        type: string
+      - description: File index (alias)
+        in: query
+        name: fileID
+        type: string
+      - default: 0
+        description: Audio track index
+        in: query
+        name: audio
+        type: integer
+      - default: 0
+        description: Start offset in seconds
+        in: query
+        name: seconds
+        type: integer
+      produces:
+      - application/vnd.apple.mpegurl
+      responses:
+        "200":
+          description: application/vnd.apple.mpegurl playlist
+          schema:
+            type: string
+        "502":
+          description: Pipeline error
+          schema:
+            type: string
+      summary: HLS master playlist
+      tags:
+      - GStreamer
+  /gst/{hash}/probe:
+    get:
+      description: Requires a `-gst` build. Uses gst-discoverer to inspect container
+        and codec information.
+      parameters:
+      - description: Torrent infohash
+        in: path
+        name: hash
+        required: true
+        type: string
+      - description: File index in torrent
+        in: query
+        name: index
+        type: string
+      - description: File index (alias)
+        in: query
+        name: id
+        type: string
+      - description: File index (alias)
+        in: query
+        name: fileID
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Media probe result
+          schema:
+            $ref: '#/definitions/api.gstreamerProbeInfoDoc'
+        "400":
+          description: Invalid source
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "502":
+          description: Probe failed
+          schema:
+            type: string
+        "504":
+          description: Probe timed out
+          schema:
+            type: string
+      summary: Probe torrent media tracks
+      tags:
+      - GStreamer
+  /gst/{hash}/seg/{segment}:
+    get:
+      description: Requires a `-gst` build. Returns an fMP4 media segment for HLS
+        playback.
+      parameters:
+      - description: Torrent infohash
+        in: path
+        name: hash
+        required: true
+        type: string
+      - description: Segment index (e.g. 0.m4s)
+        in: path
+        name: segment
+        required: true
+        type: string
+      - description: Audio track index
+        in: query
+        name: audio
+        type: integer
+      produces:
+      - video/mp4
+      responses:
+        "200":
+          description: video/mp4 media segment
+          schema:
+            type: file
+        "206":
+          description: Partial content
+          schema:
+            type: file
+        "400":
+          description: Invalid segment
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Task not found
+        "502":
+          description: Pipeline error
+          schema:
+            type: string
+      summary: HLS media segment
+      tags:
+      - GStreamer
+  /gst/echo:
+    get:
+      description: Requires a `-gst` build. Not available in standard binaries.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: GStreamer runtime status
+          schema:
+            $ref: '#/definitions/api.gstreamerEchoDocResponse'
+      summary: GStreamer health check
+      tags:
+      - GStreamer
+  /gst/remove:
+    get:
+      description: Requires a `-gst` build. Not available in standard binaries.
+      parameters:
+      - description: Torrent infohash
+        in: query
+        name: hash
+        type: string
+      - description: Torrent infohash (alias)
+        in: query
+        name: id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Task removed
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "400":
+          description: Invalid identifier
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Task not found
+      summary: Stop GStreamer transcode task
+      tags:
+      - GStreamer
+  /gst/settings:
+    get:
+      description: 'On `-gst` builds returns built_in, config and defaults. On standard
+        builds returns built_in: false only.'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: GStreamer settings
+          schema:
+            $ref: '#/definitions/api.gstreamerSettingsDocResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Get GStreamer configuration
+      tags:
+      - GStreamer
+    post:
+      consumes:
+      - application/json
+      description: Available on `-gst` builds only; standard builds return 404.
+      parameters:
+      - description: GStreamer settings request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.gstreamerSettingsDocRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Update successful
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Invalid input data
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Read-only mode
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: GStreamer is not built in
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Update GStreamer configuration
+      tags:
+      - GStreamer
+  /jacred/search:
+    get:
+      description: Searches the configured JacRed aggregator.
+      parameters:
+      - description: JacRed query
+        in: query
+        name: query
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: JacRed torrent search result(s)
+          schema:
+            items:
+              $ref: '#/definitions/models.TorrentDetails'
+            type: array
+      summary: Makes a JacRed search
+      tags:
+      - API
   /magnets:
     get:
       description: Get HTML of magnet links.
@@ -491,6 +1139,10 @@ paths:
         in: query
         name: fromlast
         type: boolean
+      - description: Start the playlist at this file id (overrides fromlast)
+        in: query
+        name: index
+        type: integer
       produces:
       - audio/x-mpegurl
       responses:
@@ -512,6 +1164,22 @@ paths:
           schema:
             type: file
       summary: Get a M3U playlist with all torrents
+      tags:
+      - API
+  /runtime/status:
+    get:
+      description: Read-only flags for DLNA/Bonjour/WebDAV/FUSE plus structured BT
+        stats (and raw /stat text).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.RuntimeStatus'
+      security:
+      - BasicAuth: []
+      summary: Runtime integration + BitTorrent status
       tags:
       - API
   /search:
@@ -808,6 +1476,25 @@ paths:
       summary: Handle torrents informations
       tags:
       - API
+  /torznab/caps:
+    get:
+      description: Returns the categories and limits advertised by a configured indexer.
+      parameters:
+      - description: Indexer index in the configured list
+        in: query
+        name: index
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Indexer capabilities
+          schema:
+            $ref: '#/definitions/api.torznabCapsResponse'
+      summary: Fetch torznab indexer capabilities
+      tags:
+      - API
   /torznab/search:
     get:
       description: Makes a torznab search.
@@ -816,6 +1503,22 @@ paths:
         in: query
         name: query
         required: true
+        type: string
+      - description: Indexer index (-1 = all configured)
+        in: query
+        name: index
+        type: string
+      - description: Torznab categories, comma-separated (default 5000,2000 = TV+Movies)
+        in: query
+        name: cat
+        type: string
+      - description: Result offset for pagination
+        in: query
+        name: offset
+        type: string
+      - description: Max results (default 100, capped at 250)
+        in: query
+        name: limit
         type: string
       produces:
       - application/json
@@ -852,6 +1555,78 @@ paths:
               $ref: '#/definitions/settings.Viewed'
             type: array
       summary: Set / List / Remove viewed torrents
+      tags:
+      - API
+  /waf:
+    get:
+      description: Returns whitelist/blacklist IP and blocked referer lists stored
+        in settings.json, plus the built-in referer denylist and whether it is enforced.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.wafResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Get HTTP WAF lists
+      tags:
+      - API
+    post:
+      consumes:
+      - application/json
+      description: Fully replaces whitelist/blacklist IP and blocked referer lists
+        in settings.json and hot-reloads the WAF. All three lists are required; explicit
+        empty strings clear a list. default_referers_enabled is optional and switches
+        the built-in referer denylist.
+      parameters:
+      - description: Complete WAF configuration
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.wafUpdateReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.wafResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BasicAuth: []
+      summary: Update HTTP WAF lists
       tags:
       - API
 securityDefinitions:

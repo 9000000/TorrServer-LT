@@ -75,7 +75,7 @@ func stream(c *gin.Context) {
 		err := utils.TestLink(link, !notAuth)
 		if err != nil {
 			log.TLogln("Wrong link:", err)
-			c.AbortWithError(http.StatusBadRequest, errors.New("wrong link"))
+			abortWithJSONError(c, http.StatusBadRequest, errors.New("wrong link"))
 			return
 		}
 	}
@@ -91,7 +91,7 @@ func stream(c *gin.Context) {
 	}
 
 	if link == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("link should not be empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("link should not be empty"))
 		return
 	}
 
@@ -108,7 +108,7 @@ func stream(c *gin.Context) {
 		spec, torrsHash, err = utils.ParseTorrsHash(link)
 		if err != nil {
 			log.TLogln("error parse torrshash:", err)
-			c.AbortWithError(http.StatusBadRequest, err)
+			abortWithJSONError(c, http.StatusBadRequest, errors.Wrap(err, "error parse torrshash"))
 			return
 		}
 		if title == "" {
@@ -123,7 +123,7 @@ func stream(c *gin.Context) {
 	} else {
 		spec, err = utils.ParseLink(link)
 		if err != nil {
-			c.AbortWithError(http.StatusInternalServerError, err)
+			abortWithJSONError(c, http.StatusBadRequest, errors.Wrap(err, "error parse link"))
 			return
 		}
 	}
@@ -159,13 +159,13 @@ func stream(c *gin.Context) {
 	if tor == nil || tor.Stat == state.TorrentInDB {
 		tor, err = torr.AddTorrent(spec, title, poster, data, category)
 		if err != nil {
-			c.AbortWithError(http.StatusInternalServerError, err)
+			abortWithJSONError(c, http.StatusInternalServerError, errors.Wrap(err, "error adding torrent"))
 			return
 		}
 	}
 
 	if !tor.GotInfo() {
-		c.AbortWithError(http.StatusInternalServerError, errors.New("torrent connection timeout"))
+		abortWithJSONError(c, http.StatusInternalServerError, errors.New("torrent connection timeout"))
 		return
 	}
 
@@ -194,7 +194,7 @@ func stream(c *gin.Context) {
 		}
 	}
 	if index == -1 && play { // if file index not set and play file exec
-		c.AbortWithError(http.StatusBadRequest, errors.New("\"index\" is empty or wrong"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("\"index\" is empty or wrong"))
 		return
 	}
 	// preload torrent
@@ -268,7 +268,7 @@ func streamNoAuth(c *gin.Context) {
 	category := c.Query("category")
 
 	if link == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("link should not be empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("link should not be empty"))
 		return
 	}
 
@@ -285,7 +285,7 @@ func streamNoAuth(c *gin.Context) {
 		spec, torrsHash, err = utils.ParseTorrsHash(link)
 		if err != nil {
 			log.TLogln("error parse torrshash:", err)
-			c.AbortWithError(http.StatusBadRequest, err)
+			abortWithJSONError(c, http.StatusBadRequest, errors.Wrap(err, "error parse torrshash"))
 			return
 		}
 		if title == "" {
@@ -300,7 +300,7 @@ func streamNoAuth(c *gin.Context) {
 	} else {
 		spec, err = utils.ParseLink(link)
 		if err != nil {
-			c.AbortWithError(http.StatusInternalServerError, err)
+			abortWithJSONError(c, http.StatusBadRequest, errors.Wrap(err, "error parse link"))
 			return
 		}
 	}
@@ -316,7 +316,7 @@ func streamNoAuth(c *gin.Context) {
 		}
 		tor, err = torr.AddTorrent(spec, title, poster, "", category)
 		if err != nil {
-			c.AbortWithError(http.StatusInternalServerError, err)
+			abortWithJSONError(c, http.StatusInternalServerError, errors.Wrap(err, "error adding torrent"))
 			return
 		}
 	}
@@ -358,13 +358,13 @@ func streamNoAuth(c *gin.Context) {
 	if tor.Stat == state.TorrentInDB {
 		tor, err = torr.AddTorrent(spec, title, poster, data, category)
 		if err != nil {
-			c.AbortWithError(http.StatusInternalServerError, err)
+			abortWithJSONError(c, http.StatusInternalServerError, errors.Wrap(err, "error adding torrent"))
 			return
 		}
 	}
 
 	if !tor.GotInfo() {
-		c.AbortWithError(http.StatusInternalServerError, errors.New("torrent connection timeout"))
+		abortWithJSONError(c, http.StatusInternalServerError, errors.New("torrent connection timeout"))
 		return
 	}
 
@@ -383,7 +383,7 @@ func streamNoAuth(c *gin.Context) {
 		}
 	}
 	if index == -1 && play { // if file index not set and play file exec
-		c.AbortWithError(http.StatusBadRequest, errors.New("\"index\" is empty or wrong"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("\"index\" is empty or wrong"))
 		return
 	}
 	// preload torrent

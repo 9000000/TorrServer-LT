@@ -32,7 +32,7 @@ func cmdViewed(c tele.Context) error {
 			if err != nil || index < 1 {
 				return c.Send(tr(c.Sender().ID, "viewed_file_index"))
 			}
-			sets.SetViewed(&sets.Viewed{Hash: hash, FileIndex: index})
+			sets.MarkViewed(hash, index)
 			return c.Send(fmt.Sprintf(tr(c.Sender().ID, "viewed_marked"), hash, index))
 		}
 		index := -1

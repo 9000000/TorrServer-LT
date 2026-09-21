@@ -45,7 +45,7 @@ type jacredTestReq struct {
 func jacredTest(c *gin.Context) {
 	var req jacredTestReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.AbortWithError(http.StatusBadRequest, err)
+		abortWithJSONError(c, http.StatusBadRequest, err)
 		return
 	}
 

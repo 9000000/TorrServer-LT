@@ -18,6 +18,8 @@ func SetupRoute(route gin.IRouter) {
 	authorized.GET("/shutdown/*reason", shutdown)
 
 	authorized.POST("/settings", settings)
+	authorized.GET("/waf", getWAF)
+	authorized.POST("/waf", updateWAF)
 	authorized.POST("/torznab/test", torznabTest)
 	authorized.POST("/jacred/test", jacredTest)
 
@@ -78,5 +80,6 @@ func SetupRoute(route gin.IRouter) {
 	// Structured server status (integration flags + BT stats + raw /stat text).
 	authorized.GET("/runtime/status", runtimeStatus)
 
+	authorized.GET("/ffp/status", ffprobeStatus)
 	authorized.GET("/ffp/:hash/:id", ffp)
 }

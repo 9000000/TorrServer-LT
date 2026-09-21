@@ -2,7 +2,7 @@
 
 > Fork of [YouROK/TorrServer](https://github.com/YouROK/TorrServer) with the BitTorrent core replaced by [libtorrent (arvidn)](https://www.libtorrent.org/).
 >
-> **Status:** feature parity with upstream **MatriX.142.2** (including GStreamer HLS transcoding) on the libtorrent engine — streaming, preload, and seeking (including back into already-evicted regions) are verified on real torrents. The HTTP API, on-disk databases (`config.db`, JSON, `accs.db`, viewed) and the `torrs://` token format remain compatible with upstream. The cache layout under `TorrentsSavePath/<hash>/<pieceID>` is preserved.
+> **Status:** feature parity with upstream **MatriX.145** (including GStreamer HLS transcoding, WAF and MCP) on the libtorrent engine — streaming, preload, and seeking (including back into already-evicted regions) are verified on real torrents. The HTTP API, on-disk databases (`config.db`, JSON, `accs.db`, viewed) and the `torrs://` token format remain compatible with upstream. The cache layout under `TorrentsSavePath/<hash>/<pieceID>` is preserved.
 >
 > **Platforms:**
 > - Linux: `amd64`, `arm64`, `armv7`
@@ -35,6 +35,8 @@ The difference from upstream is the underlying torrent engine: `arvidn/libtorren
 - Cross-browser modern web interface
 - Optional DLNA server (with category folders)
 - Optional GStreamer HLS transcoding (`-gst` builds; audio AC3/EAC3/DTS → AAC for players without those decoders)
+- Native [MCP](server/mcp/README.md) server for AI agents (OpenClaw, Hermes, and other MCP clients)
+- HTTP access WAF (IP white/blacklist, Referer/Origin blocking)
 
 ## Getting Started
 
@@ -82,7 +84,7 @@ curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTo
 - Install a specific version:
 
   ```bash
-  sudo bash ./installTorrServerLinux.sh --install MatriX.142.LT-1.1.8 --silent
+  sudo bash ./installTorrServerLinux.sh --install MatriX.145.LT-1.1.9 --silent
   ```
 
 - Update to latest version:
@@ -213,7 +215,7 @@ docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/900000
 
 #### Environments
 
-- `TS_HTTPAUTH` - 1, and place auth file into `~/ts/config` folder for enabling basic auth
+- `TS_HTTPAUTH` - 1, and place auth file into `~/ts/config` folder for enabling basic auth (also protects the MCP endpoint `/mcp`)
 - `TS_RDB` - if 1, then the enabling `--rdb` flag
 - `TS_DONTKILL` - if 1, then the enabling `--dontkill` flag
 - `TS_PORT` - for changind default port to **5555** (example), also u need to change `-p 8090:8090` to `-p 5555:5555` (example)
@@ -222,6 +224,20 @@ docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/900000
 - `TS_LOG_PATH` - for overriding log path. Example `/opt/torrserver.log`
 - `TS_PROXYURL` - set proxy URL for BitTorrent traffic (http, socks4, socks5, socks5h), example: socks5h://user:password@example.com:2080
 - `TS_PROXYMODE` - set proxy mode: "tracker" (only HTTP trackers, default), "peers" (only peer connections), or "full" (all traffic)
+- `TS_IP` - web server bind address (`--ip`)
+- `TS_TORR_ADDR` - torrent client address (`--torrentaddr`)
+- `TS_WEB_LOG_PATH` - web access log path (`--weblogpath`)
+- `TS_SSL_ENABLE` - if 1, enables HTTPS (`--ssl`); the old name `TS_EN_SSL` still works
+- `TS_SSL_PORT` - HTTPS port (`--sslport`)
+- `TS_SSL_CERT_PATH` / `TS_SSL_KEY_PATH` - SSL certificate and key files (`--sslcert` / `--sslkey`)
+- `TS_FORCE_HTTPS_ENABLE` - if 1, redirects HTTP to HTTPS (`--force-https`)
+- `TS_SEARCH_WA_ENABLE` - if 1, search without auth (`--searchwa`)
+- `TS_STREAM_WA_ENABLE` - if 1, stream/play and M3U without auth (`--streamwa`)
+- `TS_WEBDAV_ENABLE` - if 1, enables WebDAV (`--webdav`)
+- `TS_PUBLIC_IPV4_ADDR` / `TS_PUBLIC_IPV6_ADDR` - public IP addresses (`--pubipv4` / `--pubipv6`)
+- `TS_MAX_SIZE` - max allowed stream size in bytes (`--maxsize`)
+- `TS_TELEGRAM_TOKEN` - Telegram bot token (`--tgtoken`)
+- `TS_FUSE_PATH` - FUSE mount path (`--fusepath`); the container needs `/dev/fuse` and `SYS_ADMIN`
 
 Example with full overrided command (on default values):
 
@@ -441,6 +457,43 @@ swag fmt   # lint/format the annotations
 
 API documentation is hosted as Swagger format available at path `/swagger/index.html`.
 
+### MCP (AI agents)
+
+TorrServer exposes a native [Model Context Protocol](https://modelcontextprotocol.io/) server at **`/mcp`** on the same HTTP(S) port as the web UI (default `8090`). OpenClaw, Hermes, and other MCP clients can list, add, and manage torrents, and get a play URL for the next unwatched TV episode. The REST API is unchanged.
+
+Endpoint: `http://<host>:8090/mcp` (or `https://` when `--ssl` is enabled).
+
+When HTTP auth is on (`-a` / `TS_HTTPAUTH=1`), MCP uses the same Basic credentials as the rest of the API (`accs.db`). Play links returned by tools are ordinary HTTP URLs for VLC, mpv, or a browser.
+
+**OpenClaw** (`openclaw.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "torrserver": {
+        "url": "http://127.0.0.1:8090/mcp",
+        "transport": "streamable-http"
+      }
+    }
+  }
+}
+```
+
+With auth, add `"headers": { "Authorization": "Basic <base64-user-pass>" }`.
+
+**Hermes** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  torrserver:
+    url: "http://127.0.0.1:8090/mcp"
+    headers:
+      Authorization: "Basic <base64-user-pass>"
+```
+
+See [server/mcp/README.md](server/mcp/README.md) for the tool list and next-unwatched behavior.
+
 ## Authentication
 
 The users data file should be located near to the settings. Basic auth, read more in wiki <https://en.wikipedia.org/wiki/Basic_access_authentication>.
@@ -456,24 +509,125 @@ The users data file should be located near to the settings. Basic auth, read mor
 
 Note: You should enable authentication with -a (--httpauth) TorrServer startup option.
 
-## Whitelist/Blacklist IP
+## Retrackers
 
-The lists file should be located in the same directory with config.db.
+When adding a torrent, TorrServer can modify its announce trackers according to **Settings → Additional → Retrackers**:
 
-- Whitelist file name: `wip.txt`
-- Blacklist file name: `bip.txt`
+| Mode | Behavior |
+|------|----------|
+| Don't add | Leave magnet/file trackers unchanged |
+| Add (default) | Append the default/remote list |
+| Remove | Clear trackers from the torrent |
+| Replace | Replace them with the default/remote list |
 
-Whitelist has priority over everything else.
+Related settings (same Web UI section, also via `POST /settings`):
 
-Example:
+- **`TrackersListURL`** — optional custom remote list URL. Leave it **empty** to use the built-in ngosang `trackers_best_ip.txt` mirrors, tried in order:
+  1. `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt`
+  2. `https://ngosang.github.io/trackerslist/trackers_best_ip.txt`
+  3. `https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best_ip.txt`
+  4. `https://raw.githack.com/ngosang/trackerslist/master/trackers_best_ip.txt`
 
-```text
-local:127.0.0.0-127.0.0.255
-127.0.0.0-127.0.0.255
-local:127.0.0.1
-127.0.0.1
-# at the beginning of the line, comment
+  A custom URL is tried **first**, then the mirrors. Each fetch times out after 5 s and falls back to the next URL, and to `DefaultTrackers` when all of them fail. The list is fetched in the background at start and refreshed every 12 hours; adding a torrent never waits for it.
+- **`DefaultTrackers`** — local announce URLs, one per line (`udp`/`http`/`https`/`wss`; `#` starts a comment). Used alone when every remote fetch fails, otherwise appended after the remote list.
+
+Optional file overlay (always appended when present): put `trackers.txt` in the config directory (`--path` / `-d`), next to `config.db`. Only lines starting with `udp` or `http` are read from that file.
+
+## Web Application Firewall (WAF)
+
+TorrServer includes an HTTP access WAF that filters clients by IP address and by the `Referer` and `Origin` request headers. Configure it from **Settings → WAF** or through the authenticated `/waf` API.
+
+### Configuration
+
+WAF configuration is stored in the top-level **`waf`** object in **`settings.json`**. Each rule is a separate array entry:
+
+```json
+{
+  "waf": {
+    "version": 1,
+    "whitelist": [
+      "127.0.0.1",
+      "::1",
+      "10.0.0.0/8"
+    ],
+    "blacklist": [
+      "203.0.113.0/24"
+    ],
+    "referers": [
+      "example.com"
+    ]
+  }
+}
 ```
+
+On first start, if `settings.json` has **no** `waf` key yet and legacy ACL files **`wip.txt`** (whitelist) / **`bip.txt`** (blacklist) exist in the config directory (same place as `config.db`), TorrServer imports them into `waf` arrays and renames the sources to **`wip.txt.bak`** / **`bip.txt.bak`**. Those backups are not read again. If a `waf` key already exists (even with empty lists), legacy files are left untouched.
+
+Changes saved through the web UI or API are applied immediately. After editing `settings.json` manually, restart TorrServer to load the changes.
+
+### IP rules
+
+Rules:
+
+- If the whitelist is **not empty**, the client IP must match it.
+- If the blacklist is **not empty**, a matching client IP is banned even when it is also on the whitelist.
+- An empty whitelist or blacklist disables that IP check.
+- Invalid entries are skipped and reported as warnings; valid entries remain active.
+- Banned responses use HTTP **403** with body `Banned`.
+- Client IP is taken from the TCP peer address (`RemoteAddr`). Reverse-proxy headers are not trusted by default.
+
+Supported array-entry formats include IPv4, IPv6, ranges, CIDR blocks, comments, and optional descriptions:
+
+```json
+[
+  "# comment",
+  "127.0.0.1",
+  "local:127.0.0.1",
+  "127.0.0.0-127.0.0.255",
+  "local:127.0.0.0-127.0.0.255",
+  "10.0.0.0/8",
+  "lan:10.0.0.0/8",
+  "2001:db8::1",
+  "local:2001:db8::1",
+  "2001:db8::/32"
+]
+```
+
+### Referer and Origin rules
+
+Block HTTP requests that come from unwanted sites (for example mirror pages that embed your TorrServer streams).
+
+- Each entry is a hostname. URLs with only an HTTP/HTTPS scheme and host are also accepted.
+- A rule blocks the hostname and all its subdomains.
+- Both `Referer` and `Origin` are checked before the IP allowlist, so an IP whitelist match cannot bypass a referer rule.
+- Requests without either header are allowed.
+- A built-in list of hosts (the same as upstream TorrServer's) is enforced on top of your own entries. The web UI shows it, and **Settings → WAF → Built-in referer blocklist** or `"disable_default_referers": true` in the `waf` object turns it off.
+
+```json
+{
+  "referers": [
+    "example.com",
+    "evil.example.org",
+    "# comment"
+  ]
+}
+```
+
+### API
+
+`GET /waf` returns the active editable lists, the built-in referer list (`default_referers`) and whether it is enforced (`default_referers_enabled`), status flags, and parse warnings. `POST /waf` atomically replaces all three editable lists and hot-reloads the WAF. The API uses newline-delimited strings for compatibility with the web text editors; the three lists are required and an empty string clears one. `default_referers_enabled` is optional; leaving it out keeps the current state.
+
+```shell
+curl -u USER:PASSWORD http://127.0.0.1:8090/waf
+
+curl -u USER:PASSWORD \
+  -H 'Content-Type: application/json' \
+  -d '{"whitelist":"127.0.0.1\n::1\n10.0.0.0/8","blacklist":"","referers":"example.com"}' \
+  http://127.0.0.1:8090/waf
+```
+
+In read-only mode, `GET /waf` remains available but `POST /waf` returns HTTP **403**.
+
+> **Note:** BitTorrent peer IP filtering uses a separate PeerGuardian-style file named `blocklist` in the config directory. That list is not managed by Settings → WAF / `/waf`.
 
 ## Torznab
 

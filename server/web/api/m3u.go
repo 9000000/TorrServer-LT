@@ -66,14 +66,25 @@ func allPlayList(c *gin.Context) {
 	list := "#EXTM3U\n"
 	hash := ""
 	// fn=file.m3u fix forkplayer bug with end .m3u in link
+	merge := sets.BTsets() != nil && sets.BTsets().MergeAllM3U
 	for _, tr := range torrs {
+		hash += tr.Hash().HexString()
+		// MergeAllM3U lists every file inline instead of one nested playlist per
+		// torrent. Status serves a DB-resident torrent's file list from its
+		// cached record, so this never wakes torrents; one whose files were
+		// never fetched keeps its nested-playlist entry.
+		if merge {
+			if st := tr.Status(); len(st.FileStats) > 0 {
+				list += getM3uList(st, host, false, "")
+				continue
+			}
+		}
 		list += "#EXTINF:0"
 		if tr.Poster != "" {
 			list += " tvg-logo=\"" + tr.Poster + "\""
 		}
 		list += " type=\"playlist\"," + tr.Title + "\n"
 		list += host + "/stream/" + url.PathEscape(tr.Title) + ".m3u?link=" + tr.TorrentSpec.InfoHash.HexString() + "&m3u&fn=file.m3u\n"
-		hash += tr.Hash().HexString()
 	}
 
 	sendM3U(c, "all.m3u", hash, list)
@@ -88,6 +99,7 @@ func allPlayList(c *gin.Context) {
 //
 //	@Param			hash		query	string	true	"Torrent hash"
 //	@Param			fromlast	query	bool	false	"From last play file"
+//	@Param			index		query	int		false	"Start the playlist at this file id (overrides fromlast)"
 //
 //	@Produce		audio/x-mpegurl
 //	@Success		200	{file}	file
@@ -97,13 +109,13 @@ func playList(c *gin.Context) {
 	_, fromlast := c.GetQuery("fromlast")
 	index := c.Query("index")
 	if hash == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("hash is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("hash is empty"))
 		return
 	}
 
 	tor := torr.GetTorrent(hash)
 	if tor == nil {
-		c.AbortWithStatus(http.StatusNotFound)
+		abortWithJSONError(c, http.StatusNotFound, errors.New("torrent not found"))
 		return
 	}
 
@@ -115,7 +127,7 @@ func playList(c *gin.Context) {
 	if tor.Stat == state.TorrentInDB && len(tor.Status().FileStats) == 0 {
 		tor = torr.LoadTorrent(tor)
 		if tor == nil {
-			c.AbortWithError(http.StatusInternalServerError, errors.New("error get torrent info"))
+			abortWithJSONError(c, http.StatusInternalServerError, errors.New("error get torrent info"))
 			return
 		}
 	}
@@ -147,12 +159,14 @@ func sendM3U(c *gin.Context, name, hash string, m3u string) {
 	http.ServeContent(c.Writer, c.Request, name, time.Now(), bytes.NewReader([]byte(m3u)))
 }
 
+// getM3uList renders the file entries of one torrent. startIndex (a file id,
+// the same number /stream takes as index=) starts the list at that file and
+// takes precedence over fromLast.
 func getM3uList(tor *state.TorrentStatus, host string, fromLast bool, startIndex string) string {
 	m3u := ""
 	from := 0
 	if startIndex != "" {
-		id, err := strconv.Atoi(startIndex)
-		if err == nil {
+		if id, err := strconv.Atoi(startIndex); err == nil {
 			for i, f := range tor.FileStats {
 				if f.Id == id {
 					from = i

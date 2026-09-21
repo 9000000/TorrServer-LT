@@ -31,7 +31,7 @@ func cache(c *gin.Context) {
 	var req cacheReqJS
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
-		c.AbortWithError(http.StatusBadRequest, err)
+		abortWithJSONError(c, http.StatusBadRequest, err)
 		return
 	}
 	c.Status(http.StatusBadRequest)
@@ -45,7 +45,7 @@ func cache(c *gin.Context) {
 
 func getCache(req cacheReqJS, c *gin.Context) {
 	if req.Hash == "" {
-		c.AbortWithError(http.StatusBadRequest, errors.New("hash is empty"))
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("hash is empty"))
 		return
 	}
 	// Read-only lookup: a torrent must stay alive because it is being PLAYED

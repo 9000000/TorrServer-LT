@@ -47,6 +47,10 @@ func NewBTS() *BTServer {
 // Connect builds the libtorrent session from current BTsets and starts
 // the alert pump. Safe to call after Disconnect.
 func (bt *BTServer) Connect() error {
+	// Warm the remote trackers list in the background so torrents added right
+	// after start already get it; adding never waits for the download.
+	utils.PrefetchTrackers()
+
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
 	if bt.session != nil {
@@ -576,7 +580,7 @@ func applyProxyConfig(cfg lt.SessionConfig) {
 	cfg["proxy_peer_connections"] = peer
 }
 
-// ReloadIPFilter re-reads bip.txt/wip.txt from disk and pushes the new
+// ReloadIPFilter re-reads the data dir's `blocklist` file and pushes the new
 // filter into the live session. Safe no-op when no session is running.
 func (bt *BTServer) ReloadIPFilter() error {
 	bt.mu.Lock()

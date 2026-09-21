@@ -3,57 +3,55 @@ package utils
 import (
 	"crypto/rand"
 	"encoding/base32"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"server/log"
 	"server/settings"
 )
 
+// trackersFetchTimeout bounds one remote trackers-list download. The fetch
+// runs in the background, but a blocked mirror must still give up quickly so
+// the next mirror in the chain gets its turn.
+const trackersFetchTimeout = 5 * time.Second
+
+// trackersRefreshInterval controls how often the remote trackers list is
+// re-fetched in the background. On refresh failure the existing cache is kept.
+var trackersRefreshInterval = 12 * time.Hour
+
+// defaultTrackersListURLs is the built-in mirror chain. Tests stub it to keep
+// off the network.
+var defaultTrackersListURLs = append([]string(nil), settings.DefaultTrackersListURLs...)
+
 var (
-	// Healthy, highly reliable public fallback trackers
-	defTrackers = []string{
-		"udp://tracker.opentrackr.org:1337/announce",
-		"udp://open.demonii.com:1337/announce",
-		"udp://open.stealth.si:80/announce",
-		"udp://tracker.torrent.eu.org:451/announce",
-		"udp://explodie.org:6969/announce",
-		"udp://tracker.openbittorrent.com:6969/announce",
-		"udp://tracker.cyberia.is:6969/announce",
-		"udp://exodus.desync.com:6969/announce",
-		"http://tracker.opentrackr.org:1337/announce",
-		"http://bt4.t-ru.org/ann?magnet",
-		"wss://tracker.btorrent.xyz",
-		"wss://tracker.openwebtorrent.com",
-	}
+	// fallbackTrackers is used when BTsets is not loaded yet or its
+	// DefaultTrackers list is empty.
+	fallbackTrackers = parseTrackerLines(settings.DefaultTrackersText)
 
-	// High-availability upstream tracker lists + CDN mirrors
-	defaultTrackerURLs = []string{
-		"https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt",
-		"https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best_ip.txt",
-		"https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt",
-		"https://cdn.jsdelivr.net/gh/XIU2/TrackersListCollection@master/best.txt",
-		"https://newtrackon.com/api/stable",
-	}
+	trackersMu         sync.RWMutex
+	loadedTrackers     []string // nil until the first fetch settles; GetDefTrackers serves the local list meanwhile
+	trackersFetchGen   atomic.Uint64
+	prefetchMu         sync.Mutex
+	prefetchStartedGen uint64 = ^uint64(0)
+	refreshLoopOnce    sync.Once
 
-	trackerClient = &http.Client{
-		Timeout: 7 * time.Second,
-	}
-
-	trackersMu      sync.RWMutex
-	loadedTrackers  []string
-	lastUpdated     time.Time
-	isUpdating      bool
-	updateMu        sync.Mutex
-	trackerInitOnce sync.Once
-
-	refreshInterval = 24 * time.Hour
+	fileTrackersMu sync.Mutex
 )
+
+func getTrackersFilePath() string {
+	dir := settings.Path
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "trackers.txt")
+}
 
 func normalizeTracker(s string) (string, bool) {
 	s = strings.TrimSpace(s)
@@ -72,113 +70,22 @@ func normalizeTracker(s string) (string, bool) {
 	return "", false
 }
 
-func fetchTrackersFromURL(url string) ([]string, error) {
-	resp, err := trackerClient.Get(url)
+// GetTrackerFromFile loads optional trackers.txt from data dir.
+func GetTrackerFromFile() []string {
+	targetFile := getTrackersFilePath()
+	buf, err := os.ReadFile(targetFile)
 	if err != nil {
-		return nil, err
+		return nil
 	}
-	defer resp.Body.Close()
-
-	buf, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
 	var ret []string
-	for _, line := range strings.Split(string(buf), "\n") {
-		if tr, ok := normalizeTracker(line); ok {
+	seen := make(map[string]bool)
+	for _, l := range strings.Split(string(buf), "\n") {
+		if tr, ok := normalizeTracker(l); ok && !seen[strings.ToLower(tr)] {
+			seen[strings.ToLower(tr)] = true
 			ret = append(ret, tr)
 		}
 	}
-	return ret, nil
-}
-
-func refreshTrackers() {
-	updateMu.Lock()
-	if isUpdating {
-		updateMu.Unlock()
-		return
-	}
-	isUpdating = true
-	updateMu.Unlock()
-
-	defer func() {
-		updateMu.Lock()
-		isUpdating = false
-		updateMu.Unlock()
-	}()
-
-	var sources []string
-	if env := os.Getenv("TS_TRACKERS_URL"); env != "" {
-		for _, u := range strings.FieldsFunc(env, func(r rune) bool {
-			return r == ',' || r == ';' || r == ' ' || r == '\n'
-		}) {
-			if u = strings.TrimSpace(u); u != "" {
-				sources = append(sources, u)
-			}
-		}
-	}
-	sources = append(sources, defaultTrackerURLs...)
-
-	seen := make(map[string]bool)
-	var fresh []string
-
-	for _, src := range sources {
-		list, err := fetchTrackersFromURL(src)
-		if err != nil || len(list) == 0 {
-			continue
-		}
-		log.TLogln("utils.trackers: fetched", len(list), "trackers from", src)
-		for _, tr := range list {
-			if !seen[tr] {
-				seen[tr] = true
-				fresh = append(fresh, tr)
-			}
-		}
-		// If we've gathered a healthy list of trackers (>= 20), we have enough
-		if len(fresh) >= 20 {
-			break
-		}
-	}
-
-	// Always ensure healthy fallback trackers are included
-	for _, tr := range defTrackers {
-		if !seen[tr] {
-			seen[tr] = true
-			fresh = append(fresh, tr)
-		}
-	}
-
-	if len(fresh) > 0 {
-		trackersMu.Lock()
-		loadedTrackers = fresh
-		lastUpdated = time.Now()
-		trackersMu.Unlock()
-		log.TLogln("utils.trackers: total active trackers:", len(fresh))
-	}
-}
-
-// InitTrackers starts background fetching and sets up daily periodic refresh.
-func InitTrackers() {
-	trackerInitOnce.Do(func() {
-		go func() {
-			refreshTrackers()
-			ticker := time.NewTicker(refreshInterval)
-			for range ticker.C {
-				refreshTrackers()
-			}
-		}()
-	})
-}
-
-var fileTrackersMu sync.Mutex
-
-func getTrackersFilePath() string {
-	dir := settings.Path
-	if dir == "" {
-		dir = "."
-	}
-	return filepath.Join(dir, "trackers.txt")
+	return ret
 }
 
 // SaveTrackersToFile saves new unique trackers from incoming torrents/magnets to trackers.txt.
@@ -270,40 +177,201 @@ func SaveTrackersToFile(trackers []string) {
 	trackersMu.Unlock()
 }
 
-// GetTrackerFromFile loads optional trackers.txt from data dir.
-func GetTrackerFromFile() []string {
-	targetFile := getTrackersFilePath()
-	buf, err := os.ReadFile(targetFile)
-	if err != nil {
-		return nil
+// InitTrackers initializes and starts background prefetching of trackers.
+func InitTrackers() {
+	PrefetchTrackers()
+}
+
+// GetDefTrackers returns the remote list merged with the local defaults once a
+// background fetch has settled, and the local defaults before that. It never
+// touches the network: it sits on the torrent add path, which used to block on
+// a synchronous download (with no timeout) whenever GitHub was unreachable.
+func GetDefTrackers() []string {
+	trackersMu.RLock()
+	if loadedTrackers != nil {
+		out := append([]string(nil), loadedTrackers...)
+		trackersMu.RUnlock()
+		return out
 	}
+	trackersMu.RUnlock()
+	startPrefetch()
+	return configuredDefaultTrackers()
+}
+
+// PrefetchTrackers loads the remote trackers list in the background. Safe to
+// call repeatedly: fetches of the same generation are deduplicated. It also
+// starts the periodic refresh loop once.
+func PrefetchTrackers() {
+	startPrefetch()
+	refreshLoopOnce.Do(func() {
+		go trackersRefreshLoop()
+	})
+}
+
+// InvalidateTrackersCache drops the cached list and starts a new background
+// fetch from the current settings.
+func InvalidateTrackersCache() {
+	trackersMu.Lock()
+	loadedTrackers = nil
+	trackersMu.Unlock()
+	trackersFetchGen.Add(1)
+	startPrefetch()
+}
+
+func parseTrackerLines(text string) []string {
 	var ret []string
-	seen := make(map[string]bool)
-	for _, l := range strings.Split(string(buf), "\n") {
-		if tr, ok := normalizeTracker(l); ok && !seen[strings.ToLower(tr)] {
-			seen[strings.ToLower(tr)] = true
-			ret = append(ret, tr)
+	for _, s := range strings.Split(text, "\n") {
+		s = strings.TrimSpace(s)
+		if s == "" || strings.HasPrefix(s, "#") {
+			continue
+		}
+		if strings.HasPrefix(s, "udp") || strings.HasPrefix(s, "http") || strings.HasPrefix(s, "wss") {
+			ret = append(ret, s)
 		}
 	}
 	return ret
 }
 
-// GetDefTrackers returns the default tracker list, automatically refreshed in the background.
-func GetDefTrackers() []string {
-	InitTrackers()
+func configuredDefaultTrackers() []string {
+	if sets := settings.BTsets(); sets != nil && strings.TrimSpace(sets.DefaultTrackers) != "" {
+		if parsed := parseTrackerLines(sets.DefaultTrackers); len(parsed) > 0 {
+			return parsed
+		}
+	}
+	return append([]string(nil), fallbackTrackers...)
+}
 
-	trackersMu.RLock()
-	defer trackersMu.RUnlock()
-
-	if len(loadedTrackers) == 0 {
-		ret := make([]string, len(defTrackers))
-		copy(ret, defTrackers)
-		return ret
+// configuredTrackersListURLs returns the custom list URL (if any) followed by
+// the built-in mirrors, without duplicates.
+func configuredTrackersListURLs() []string {
+	var custom string
+	if sets := settings.BTsets(); sets != nil {
+		custom = strings.TrimSpace(sets.TrackersListURL)
 	}
 
-	ret := make([]string, len(loadedTrackers))
-	copy(ret, loadedTrackers)
-	return ret
+	seen := make(map[string]struct{}, len(defaultTrackersListURLs)+1)
+	var urls []string
+	add := func(u string) {
+		if u == "" {
+			return
+		}
+		if _, ok := seen[u]; ok {
+			return
+		}
+		seen[u] = struct{}{}
+		urls = append(urls, u)
+	}
+	add(custom)
+	for _, u := range defaultTrackersListURLs {
+		add(u)
+	}
+	return urls
+}
+
+func startPrefetch() {
+	gen := trackersFetchGen.Load()
+
+	prefetchMu.Lock()
+	if prefetchStartedGen == gen {
+		prefetchMu.Unlock()
+		return
+	}
+	prefetchStartedGen = gen
+	prefetchMu.Unlock()
+
+	local := configuredDefaultTrackers()
+	urls := configuredTrackersListURLs()
+	if len(urls) == 0 {
+		setLoadedTrackers(gen, local, "")
+		return
+	}
+
+	go fetchTrackersAsync(gen, urls, local)
+}
+
+// setLoadedTrackers publishes a fetch result unless the cache was invalidated
+// (settings changed) while the fetch was in flight.
+func setLoadedTrackers(gen uint64, trackers []string, logMsg string) bool {
+	if trackersFetchGen.Load() != gen {
+		return false
+	}
+	trackersMu.Lock()
+	if trackersFetchGen.Load() != gen {
+		trackersMu.Unlock()
+		return false
+	}
+	loadedTrackers = append([]string(nil), trackers...)
+	trackersMu.Unlock()
+	if logMsg != "" {
+		log.TLogln(logMsg)
+	}
+	return true
+}
+
+func fetchTrackersAsync(gen uint64, urls []string, local []string) {
+	merged, usedURL, err := fetchTrackersFromURLs(urls, local)
+	if err != nil {
+		setLoadedTrackers(gen, local, "trackerslist fetch failed, using DefaultTrackers: "+err.Error())
+		return
+	}
+	remoteCount := len(merged) - len(local)
+	setLoadedTrackers(gen, merged, fmt.Sprintf("trackerslist loaded from %s: %d remote + %d local", usedURL, remoteCount, len(local)))
+}
+
+func fetchTrackersFromURLs(urls []string, local []string) ([]string, string, error) {
+	if len(urls) == 0 {
+		return nil, "", fmt.Errorf("no trackers list URLs")
+	}
+	var errs []string
+	for _, url := range urls {
+		merged, err := fetchTrackersFromURL(url, local)
+		if err == nil {
+			return merged, url, nil
+		}
+		log.TLogln("trackerslist fetch failed (" + url + "): " + err.Error())
+		errs = append(errs, url+": "+err.Error())
+	}
+	return nil, "", fmt.Errorf("all URLs failed: %s", strings.Join(errs, "; "))
+}
+
+func fetchTrackersFromURL(url string, local []string) ([]string, error) {
+	client := &http.Client{Timeout: trackersFetchTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	remote := parseTrackerLines(string(buf))
+	if len(remote) == 0 {
+		return nil, fmt.Errorf("empty list")
+	}
+	return append(remote, local...), nil
+}
+
+func trackersRefreshLoop() {
+	for {
+		time.Sleep(trackersRefreshInterval)
+		urls := configuredTrackersListURLs()
+		if len(urls) == 0 {
+			continue
+		}
+		gen := trackersFetchGen.Load()
+		local := configuredDefaultTrackers()
+		merged, usedURL, err := fetchTrackersFromURLs(urls, local)
+		if err != nil {
+			log.TLogln("trackerslist refresh failed:", err.Error())
+			continue
+		}
+		remoteCount := len(merged) - len(local)
+		setLoadedTrackers(gen, merged, fmt.Sprintf("trackerslist refreshed from %s: %d remote + %d local", usedURL, remoteCount, len(local)))
+	}
 }
 
 // PeerIDRandom builds a peer id with the given prefix padded to 20 chars

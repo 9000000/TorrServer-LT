@@ -11,6 +11,7 @@ import (
 	"server/log"
 	"server/lt"
 	sets "server/settings"
+	"server/torr/utils"
 	"server/version"
 )
 
@@ -289,13 +290,18 @@ func SetSettings(set *sets.BTSets) {
 	// cached before the switch, which would otherwise overwrite the chosen
 	// backend and silently revert it to json on the next restart. Preserve the
 	// live values.
+	trackersChanged := true
 	if set != nil {
 		if cur := sets.BTsets(); cur != nil {
 			set.StoreSettingsInJson = cur.StoreSettingsInJson
 			set.StoreViewedInJson = cur.StoreViewedInJson
+			trackersChanged = set.TrackersListURL != cur.TrackersListURL || set.DefaultTrackers != cur.DefaultTrackers
 		}
 	}
 	sets.SetBTSets(set)
+	if trackersChanged {
+		utils.InvalidateTrackersCache()
+	}
 	log.TLogln("torr.SetSettings: dropping all torrents")
 	dropAllTorrent()
 	time.Sleep(time.Second)
@@ -314,6 +320,7 @@ func SetDefSettings() {
 		return
 	}
 	sets.SetDefaultConfig()
+	utils.InvalidateTrackersCache()
 	log.TLogln("torr.SetDefSettings: dropping all torrents")
 	dropAllTorrent()
 	time.Sleep(time.Second)

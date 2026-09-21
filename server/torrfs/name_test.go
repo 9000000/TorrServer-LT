@@ -1,30 +1,34 @@
 package torrfs
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestSanitizeName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"normal name", "normal name"},
-		{"movie / title", "movie _ title"},
-		{"path\\with\\backslashes", "path_with_backslashes"},
-		{"mix/of\\both", "mix_of_both"},
-		{"..", ""},
-		{".", ""},
-		{"", ""},
-		{"   ", ""},
-		{"clean\x00control\x1fchars", "cleancontrolchars"},
-		{"leading / trailing /", "leading _ trailing _"},
+	cases := map[string]string{
+		"Movie (2024)":           "Movie (2024)",
+		"AC/DC - Live":           "AC_DC - Live",
+		`Show\Season 1`:          "Show_Season 1",
+		"  padded  ":             "padded",
+		"tab\there\x7f":          "tabhere",
+		".":                      "",
+		"..":                     "",
+		"/":                      "_",
+		"":                       "",
+		"Сериал / Series S01E01": "Сериал _ Series S01E01",
 	}
-
-	for _, tc := range tests {
-		got := SanitizeName(tc.input)
-		if got != tc.want {
-			t.Errorf("SanitizeName(%q) = %q, want %q", tc.input, got, tc.want)
+	for in, want := range cases {
+		if got := SanitizeName(in); got != want {
+			t.Errorf("SanitizeName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCategoryNameFallsBackToOther(t *testing.T) {
+	for _, in := range []string{"", "  ", ".", ".."} {
+		if got := categoryName(in); got != "other" {
+			t.Errorf("categoryName(%q) = %q, want other", in, got)
+		}
+	}
+	if got := categoryName("tv/shows"); got != "tv_shows" {
+		t.Errorf("categoryName(tv/shows) = %q", got)
 	}
 }
