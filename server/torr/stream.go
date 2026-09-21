@@ -50,6 +50,10 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 			break
 		}
 	}
+	if stFile == nil && len(st.FileStats) == 1 && fileID == 1 {
+		stFile = st.FileStats[0]
+		fileID = stFile.Id
+	}
 	if stFile == nil {
 		err := fmt.Errorf("torr.Stream: file id %d not found", fileID)
 		http.Error(resp, err.Error(), http.StatusNotFound)
@@ -103,7 +107,8 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	sets.MarkViewed(t.Hash().HexString(), fileID)
 
 	// HTTP / DLNA headers.
-	resp.Header().Set("Connection", "close")
+	// Do not force Connection: close — let the player use HTTP keep-alive
+	// for smoother streaming (VLC, MX Player benefit from persistent connections).
 	resp.Header().Set("Server", "TorrServer (Portable SDK for UPnP devices)")
 	resp.Header().Set("transferMode.dlna.org", "Streaming")
 
