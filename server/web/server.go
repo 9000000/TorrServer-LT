@@ -110,30 +110,33 @@ func Start() {
 
 	// check if https enabled
 	if settings.Ssl {
-		// if no cert and key files set in db/settings, generate new self-signed cert and key files
-		if settings.BTsets().SslCert == "" || settings.BTsets().SslKey == "" {
-			settings.BTsets().SslCert, settings.BTsets().SslKey = sslcerts.MakeCertKeyFiles(ips)
-			log.TLogln("Saving path to ssl cert and key in db", settings.BTsets().SslCert, settings.BTsets().SslKey)
-			settings.SetBTSets(settings.BTsets())
-		}
-		// verify if cert and key files are valid
-		err = sslcerts.VerifyCertKeyFiles(settings.BTsets().SslCert, settings.BTsets().SslKey, settings.SslPort)
-		// if not valid, generate new self-signed cert and key files
-		if err != nil {
-			log.TLogln("Error checking certificate and private key files:", err)
-			settings.BTsets().SslCert, settings.BTsets().SslKey = sslcerts.MakeCertKeyFiles(ips)
-			log.TLogln("Saving path to ssl cert and key in db", settings.BTsets().SslCert, settings.BTsets().SslKey)
-			settings.SetBTSets(settings.BTsets())
-		}
-		go func() {
-			for _, ip := range netbind.Normalize(settings.IPs) {
-				addr := netbind.Addr(ip, settings.SslPort)
-				go func(addr string) {
-					log.TLogln("Start https server at", addr)
-					waitChan <- route.RunTLS(addr, settings.BTsets().SslCert, settings.BTsets().SslKey)
-				}(addr)
+		// Generate a self-signed pair only when none is configured, and never
+		// replace a certificate TorrServer did not generate itself.
+		cert, key, changed, certErr := sslcerts.EnsureCert(settings.BTsets().SslCert, settings.BTsets().SslKey, ips)
+		if certErr != nil {
+			// Keep serving plain HTTP instead of taking the whole server down:
+			// the certificate is the user's to fix. settings.Ssl goes off so
+			// nothing else (force-https redirect, Bonjour, generated links)
+			// points at an HTTPS port nobody listens on.
+			log.TLogln("HTTPS disabled, certificate unusable:", certErr)
+			log.TLogln("Fix --sslcert/--sslkey, or clear them in settings to get a self-signed certificate. HTTP keeps running.")
+			settings.Ssl = false
+		} else {
+			if changed {
+				settings.BTsets().SslCert, settings.BTsets().SslKey = cert, key
+				log.TLogln("Saving path to ssl cert and key in db", cert, key)
+				settings.SetBTSets(settings.BTsets())
 			}
-		}()
+			go func() {
+				for _, ip := range netbind.Normalize(settings.IPs) {
+					addr := netbind.Addr(ip, settings.SslPort)
+					go func(addr string) {
+						log.TLogln("Start https server at", addr)
+						waitChan <- route.RunTLS(addr, cert, key)
+					}(addr)
+				}
+			}()
+		}
 	}
 
 	go func() {
