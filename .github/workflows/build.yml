@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _deps/${{ matrix.target }}
-          key: deps-${{ matrix.target }}-boost1.85.0-lt2.1.2-ossl3.5.7-v1
+          key: deps-${{ matrix.target }}-boost1.85.0-lt2.1.2-ossl3.5.7-v2
 
       - name: Set up Go
         uses: actions/setup-go@v5
