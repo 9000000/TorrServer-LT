@@ -331,7 +331,7 @@ go_build() {
             PKG_CONFIG_PATH="$deps/lib/pkgconfig" \
             PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" \
             CGO_CFLAGS="-DTS_PC_STAMP=$pc_stamp" \
-            CGO_CXXFLAGS="-DTS_PC_STAMP=$pc_stamp -DTSL_HAVE_LT_INTERNALS" \
+            CGO_CXXFLAGS="-DTS_PC_STAMP=$pc_stamp -DTSL_HAVE_LT_INTERNALS ${EXTRA_CGO_CXXFLAGS:-}" \
             CGO_LDFLAGS="-L$deps/lib ${EXTRA_CGO_LDFLAGS:-}" \
             go build \
             "$@" \
@@ -363,7 +363,7 @@ cross_build() {
     # (2.0.13, no OpenSSL) would silently survive a version bump. Stamp the
     # tree with the exact recipe and nuke it on mismatch.
     local stamp="$deps/.stamp"
-    local want="lt=$LIBTORRENT_TAG openssl=$OPENSSL_VERSION webtorrent=on"
+    local want="lt=$LIBTORRENT_TAG openssl=$OPENSSL_VERSION webtorrent=on b2=${B2_FLAGS:-}"
     if [[ -e "$deps" && "$(cat "$stamp" 2>/dev/null || true)" != "$want" ]]; then
         log "deps tree for $TARGET is stale (want: $want) — rebuilding"
         rm -rf "$deps"
