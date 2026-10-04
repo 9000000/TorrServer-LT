@@ -79,6 +79,9 @@ func main() {
 
 	log.TLogln("=========== START ===========")
 	log.TLogln("TorrServer-LT", version.Version+",", "libtorrent", lt.Version()+",", runtime.Version()+",", "CPU Num:", runtime.NumCPU())
+	if msg := configureCARoots(); msg != "" {
+		log.TLogln(msg)
+	}
 	if params.HttpAuth {
 		log.TLogln("Use HTTP Auth file", settings.Path+"/accs.db")
 	}

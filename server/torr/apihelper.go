@@ -308,9 +308,28 @@ func SetSettings(set *sets.BTSets) {
 	log.TLogln("torr.SetSettings: disconnect")
 	bts.Disconnect()
 	log.TLogln("torr.SetSettings: reconnect")
-	if err := bts.Connect(); err != nil {
-		log.TLogln("torr.SetSettings: connect:", err)
+	reconnect("torr.SetSettings")
+}
+
+// reconnect retries Connect after a Disconnect. A single failed attempt (the
+// peer port of the closed session still bound, a transient bind error) would
+// otherwise leave the engine without a session until the server is restarted:
+// every add then answers "BT client not connected".
+func reconnect(who string) {
+	var err error
+	for i := 0; i < 30; i++ {
+		if err = bts.Connect(); err == nil {
+			if i > 0 {
+				log.TLogln(who+": connect ok, attempt", i+1)
+			}
+			return
+		}
+		if i == 0 {
+			log.TLogln(who+": connect error, retrying:", err)
+		}
+		time.Sleep(time.Second)
 	}
+	log.TLogln(who+": connect failed:", err)
 }
 
 // SetDefSettings resets settings to defaults and bounces the session.
@@ -325,9 +344,7 @@ func SetDefSettings() {
 	dropAllTorrent()
 	time.Sleep(time.Second)
 	bts.Disconnect()
-	if err := bts.Connect(); err != nil {
-		log.TLogln("torr.SetDefSettings: connect:", err)
-	}
+	reconnect("torr.SetDefSettings")
 }
 
 func dropAllTorrent() {
