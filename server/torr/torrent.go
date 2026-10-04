@@ -49,8 +49,8 @@ type Torrent struct {
 	BytesWrittenData    int64
 
 	// counters driven by the alert pump (atomic)
-	piecesDirtiedGood int64
-	piecesDirtiedBad  int64
+	piecesDirtiedGood atomic.Int64
+	piecesDirtiedBad  atomic.Int64
 
 	filesMu     sync.RWMutex
 	cachedFiles []*File
@@ -528,7 +528,7 @@ func (t *Torrent) IncPiecesDirtiedGood() {
 	if t == nil {
 		return
 	}
-	atomic.AddInt64(&t.piecesDirtiedGood, 1)
+	t.piecesDirtiedGood.Add(1)
 }
 
 // IncPiecesDirtiedBad increments the bad (corrupt/hash failed) piece counter.
@@ -536,7 +536,7 @@ func (t *Torrent) IncPiecesDirtiedBad() {
 	if t == nil {
 		return
 	}
-	atomic.AddInt64(&t.piecesDirtiedBad, 1)
+	t.piecesDirtiedBad.Add(1)
 }
 
 // Files returns the file list once metadata is known. Caches the result
@@ -642,8 +642,8 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.ChunksReadUseful = st.ChunksRead
 	st.ChunksReadWasted = (lst.TotalDownload - lst.TotalPayloadDownload) / chunkSize
 	st.ChunksWritten = lst.TotalPayloadUpload / chunkSize
-	st.PiecesDirtiedGood = atomic.LoadInt64(&t.piecesDirtiedGood)
-	st.PiecesDirtiedBad = atomic.LoadInt64(&t.piecesDirtiedBad)
+	st.PiecesDirtiedGood = t.piecesDirtiedGood.Load()
+	st.PiecesDirtiedBad = t.piecesDirtiedBad.Load()
 
 	if !lst.HasMetadata {
 		// Metadata still in flight — fall back to the DB-cached file list (if
