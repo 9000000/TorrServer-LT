@@ -11,8 +11,11 @@ CXX=g++
 B2_VARIANT=amd64
 B2_TOOLSET_CXX=g++
 B2_FLAGS="architecture=x86 address-model=64"
+# Statically link libstdc++ and libgcc so the binary runs reliably across
+# various Linux distributions without GLIBCXX version mismatch errors.
+EXTRA_CGO_LDFLAGS="-static-libstdc++ -static-libgcc"
 
-export TARGET GOOS GOARCH CC CXX B2_VARIANT B2_TOOLSET_CXX B2_FLAGS
+export TARGET GOOS GOARCH CC CXX B2_VARIANT B2_TOOLSET_CXX B2_FLAGS EXTRA_CGO_LDFLAGS
 
 # shellcheck source=_deps.sh
 . "$(dirname "$0")/_deps.sh"
