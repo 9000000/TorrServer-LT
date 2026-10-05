@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -314,6 +315,22 @@ func (bt *BTServer) handleAlert(a *lt.Alert) {
 // shim hands to libtorrent's settings_pack. Settings are best-effort: any
 // unrecognised key is silently ignored on the C++ side.
 func buildSessionConfig() (lt.SessionConfig, error) {
+	connSpeed := 250
+	torrentConnectBoost := 100
+	peerConnectTimeout := 7
+	maxPeerlistSize := 50000
+
+	// On Android (phones and TV boxes), an aggressive connection burst (250/s) easily
+	// exhausts Bionic socket buffers, overwhelms cheap Wi-Fi chipsets/drivers, and triggers
+	// home router SYN-flood throttling, leading to connection timeouts and dropped peers.
+	// We tune these parameters to stable, reliable values for mobile/TV while maintaining high throughput.
+	if runtime.GOOS == "android" {
+		connSpeed = 60
+		torrentConnectBoost = 40
+		peerConnectTimeout = 12
+		maxPeerlistSize = 10000
+	}
+
 	cfg := lt.SessionConfig{
 		"user_agent":       "qBittorrent/4.3.9",
 		"peer_fingerprint": "-qB4390-",
@@ -350,8 +367,8 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		"max_allowed_in_request_queue": 2000, // libtorrent default
 		"send_buffer_watermark":        500 * 1024,
 		"send_buffer_watermark_factor": 50,
-		"connection_speed":             250, // outgoing connection attempts per second (default 30)
-		"max_peerlist_size":            50000,
+		"connection_speed":             connSpeed,
+		"max_peerlist_size":            maxPeerlistSize,
 		"max_pex_peers":                200,
 		"dht_upload_rate_limit":        50000,
 		"mixed_mode_algorithm":         0, // prefer_tcp: steadier throughput for streaming
@@ -359,10 +376,10 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		// Swarm ramp-up: connect to many peers immediately and fail the dead
 		// ones fast, so the first seconds of playback see the full swarm
 		// instead of trickling in at libtorrent's polite defaults.
-		"torrent_connect_boost":             100, // peers to try the moment a torrent is added (default 30)
-		"peer_connect_timeout":              7,   // give up on unreachable peers sooner (default 15)
-		"piece_timeout":                     10,  // re-request a slow block from another peer sooner (default 20)
-		"min_reconnect_time":                10,  // retry failed peers sooner (default 60)
+		"torrent_connect_boost":             torrentConnectBoost,
+		"peer_connect_timeout":              peerConnectTimeout,
+		"piece_timeout":                     10, // re-request a slow block from another peer sooner (default 20)
+		"min_reconnect_time":                10, // retry failed peers sooner (default 60)
 		"allow_multiple_connections_per_ip": true,
 		"dht_announce_interval":             60,   // keep fresh peers flowing in (default 15 min)
 		"auto_scrape_interval":              1200, // cf. elementum

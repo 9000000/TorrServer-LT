@@ -334,6 +334,7 @@ go_build() {
             CGO_CXXFLAGS="-DTS_PC_STAMP=$pc_stamp -DTSL_HAVE_LT_INTERNALS ${EXTRA_CGO_CXXFLAGS:-}" \
             CGO_LDFLAGS="-L$deps/lib ${EXTRA_CGO_LDFLAGS:-}" \
             go build \
+            -trimpath \
             "$@" \
             -ldflags "-s -w ${EXTRA_GO_LDFLAGS:-} -X server/version.Version=${TS_VERSION}" \
             -o "$target_out" \

@@ -18,6 +18,23 @@ import (
 )
 
 func Preconfig(dkill bool) {
+	// Raise RLIMIT_NOFILE soft limit to hard limit to prevent "too many open files" (EMFILE)
+	// crashes when managing multiple peer connections and torrent cache files on Android.
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
+		if rLimit.Cur < rLimit.Max {
+			oldCur := rLimit.Cur
+			rLimit.Cur = rLimit.Max
+			if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+				// Fallback to a safe intermediate limit if setting to Max is restricted by SELinux
+				if rLimit.Max >= 4096 && oldCur < 4096 {
+					rLimit.Cur = 4096
+					_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+				}
+			}
+		}
+	}
+
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
 		syscall.SIGHUP,

@@ -28,7 +28,8 @@ EXTRA_GO_LDFLAGS="-checklinkname=0"
 # NDK clang++ links libc++_shared.so by default, but the TorrServe app only
 # ships the bare binary — no libc++_shared alongside — so the executable dies
 # at load time ("cannot locate symbol ... __ndk1..."). Link libc++ statically.
-EXTRA_CGO_LDFLAGS="-static-libstdc++"
+# Also enforce 16 KB page size alignment required for stability on Android 15+.
+EXTRA_CGO_LDFLAGS="-static-libstdc++ -Wl,-z,max-page-size=16384"
 EXTRA_CGO_CXXFLAGS="-DTORRENT_USE_NETLINK=0 -DTORRENT_USE_IFADDRS=1"
 # OpenSSL's android-* Configure targets need ANDROID_NDK_ROOT + the toolchain
 # on PATH; the API level define matches minSdk above.
