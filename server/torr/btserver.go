@@ -317,7 +317,7 @@ func (bt *BTServer) handleAlert(a *lt.Alert) {
 func buildSessionConfig() (lt.SessionConfig, error) {
 	connSpeed := 250
 	torrentConnectBoost := 100
-	peerConnectTimeout := 7
+	peerConnectTimeout := 12
 	maxPeerlistSize := 50000
 
 	// On Android (phones and TV boxes), an aggressive connection burst (250/s) easily
@@ -334,6 +334,9 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 	cfg := lt.SessionConfig{
 		"user_agent":       "qBittorrent/4.3.9",
 		"peer_fingerprint": "-qB4390-",
+
+		// Global DHT bootstrap routers to guarantee instant DHT bootstrap across regions
+		"dht_bootstrap_nodes": "router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.libtorrent.org:25401,dht.aelitis.com:6881",
 
 		// Streaming-tuned defaults (cf. elgatito/elementum). These trade some
 		// bandwidth politeness for fast start/seek: find peers quickly, keep

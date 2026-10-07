@@ -66,13 +66,13 @@ const reprioritizeInterval = time.Second
 const streamWindowFloorPieces = 4
 
 // configuredConnLimit is the user's authoritative per-torrent peer cap
-// (ConnectionsLimit, default 50). It is never silently exceeded for streaming —
+// (ConnectionsLimit, default 100). It is never silently exceeded for streaming —
 // the value the user sets is the cap that's actually held.
 func configuredConnLimit() int {
 	if s := settings.BTsets(); s != nil && s.ConnectionsLimit > 0 {
 		return s.ConnectionsLimit
 	}
-	return 50
+	return 100
 }
 
 // prefetchMarginBytes is retired (0): protecting EXTRA pieces past the window for

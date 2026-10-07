@@ -76,7 +76,7 @@ curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTo
 - Cài đặt một phiên bản cụ thể:
 
   ```bash
-  sudo bash ./installTorrServerLinux.sh --install MatriX.145.LT-1.1.11 --silent
+  sudo bash ./installTorrServerLinux.sh --install MatriX.145.LT-1.1.12 --silent
   ```
 
 - Cập nhật lên phiên bản mới nhất:
@@ -100,7 +100,7 @@ curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTo
 - Hạ cấp xuống phiên bản cụ thể:
 
   ```bash
-  sudo bash ./installTorrServerLinux.sh --down MatriX.145.LT-1.1.11
+  sudo bash ./installTorrServerLinux.sh --down MatriX.145.LT-1.1.12
   ```
 
 - Gỡ bỏ / Gỡ cài đặt:

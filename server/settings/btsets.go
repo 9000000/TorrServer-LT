@@ -139,20 +139,22 @@ var DefaultTrackersListURLs = []string{
 }
 
 // DefaultTrackersText is the initial value of BTSets.DefaultTrackers.
-const DefaultTrackersText = `http://retracker.local/announce
-http://bt4.t-ru.org/ann?magnet
-http://retracker.mgts.by:80/announce
-http://tracker.city9x.com:2710/announce
-http://tracker.electro-torrent.pl:80/announce
-http://tracker.internetwarriors.net:1337/announce
-http://tracker2.itzmx.com:6961/announce
-udp://opentor.org:2710
-udp://public.popcorn-tracker.org:6969/announce
-udp://tracker.opentrackr.org:1337/announce
-http://bt.svao-ix.ru/announce
+const DefaultTrackersText = `udp://tracker.opentrackr.org:1337/announce
+udp://open.stealth.si:80/announce
+udp://tracker.torrent.eu.org:451/announce
+udp://open.demonii.com:1337/announce
+udp://exodus.desync.com:6969/announce
+udp://tracker.qu.ax:6969/announce
 udp://explodie.org:6969/announce
-wss://tracker.btorrent.xyz
-wss://tracker.openwebtorrent.com`
+udp://tracker.openbittorrent.com:6969/announce
+udp://tracker.skynetcloud.site:6969/announce
+udp://tracker.dler.org:6969/announce
+udp://tracker.moeking.me:6969/announce
+udp://tracker.bittor.pw:1337/announce
+udp://opentor.net:6969/announce
+udp://retracker.hotplug.ru:2710/announce
+http://tracker.openbittorrent.com:80/announce
+https://tracker.tamersunion.org:443/announce`
 
 // btSets holds the live BitTorrent settings. It's an atomic pointer because it
 // is swapped at runtime (SetBTSets / SetDefaultConfig, e.g. from the settings
@@ -177,7 +179,7 @@ func SetBTSets(sets *BTSets) {
 		sets.CacheSize = 64 * 1024 * 1024
 	}
 	if sets.ConnectionsLimit == 0 {
-		sets.ConnectionsLimit = 50
+		sets.ConnectionsLimit = 100
 	}
 	if sets.DHTConnectionsLimit <= 0 {
 		sets.DHTConnectionsLimit = 500
@@ -234,10 +236,9 @@ func SetDefaultConfig() {
 	sets := new(BTSets)
 	sets.CacheSize = 64 * 1024 * 1024 // 64 MB
 	sets.PreloadCache = 50
-	// Per-torrent peer cap (see torr.buildSessionConfig). 50 matches
-	// Transmission's default; 25 (the anacrolix-era default) measurably
-	// caps single-torrent speed on fast links.
-	sets.ConnectionsLimit = 50
+	// Per-torrent peer cap (see torr.buildSessionConfig). 100 allows
+	// recruiting sufficient unchoked seeds in swarms while keeping overhead low.
+	sets.ConnectionsLimit = 100
 	sets.DHTConnectionsLimit = 500
 	sets.RetrackersMode = 1
 	sets.TrackersListURL = ""
