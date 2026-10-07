@@ -46,3 +46,4 @@ toolchains/
 # mirror), not a source/fixture. Used by the manual full-parse rutor tests.
 rutor.ls
 log.txt
+.agent/
