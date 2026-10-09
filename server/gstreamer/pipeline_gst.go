@@ -173,6 +173,20 @@ func initGStreamerRuntime(conf Config) {
 
 func setupGStreamer(_ Config) {
 	_ = os.Setenv("GST_REGISTRY", filepath.Join(os.TempDir(), "torrserver-gstreamer-registry.bin"))
+	quietGSettings()
+}
+
+// quietGSettings keeps GLib from reaching for dconf. souphttpsrc asks GIO for
+// the proxy configuration, GIO asks GSettings, and on a server without a
+// desktop session dconf logs "unable to open file '/etc/dconf/db/local' ...
+// expect degraded performance" for every pipeline. TorrServer reads no desktop
+// settings, so the in-memory backend is equivalent and quiet; proxies from the
+// environment (http_proxy and friends) keep working. An explicit backend from
+// the environment is left alone.
+func quietGSettings() {
+	if os.Getenv("GSETTINGS_BACKEND") == "" {
+		_ = os.Setenv("GSETTINGS_BACKEND", "memory")
+	}
 }
 
 func setupGStreamerRoots(roots []string) {

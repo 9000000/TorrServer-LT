@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -98,5 +99,20 @@ func TestWarmProbeSourceSmallFile(t *testing.T) {
 	defer mu.Unlock()
 	if len(ranges) != 1 || ranges[0] != fmt.Sprintf("bytes=0-%d", size-1) {
 		t.Fatalf("ranges = %v, want the whole file in one request", ranges)
+	}
+}
+
+func TestGstDiscovererEnvQuietsDconf(t *testing.T) {
+	t.Setenv("GSETTINGS_BACKEND", "")
+	env := gstDiscovererEnv(Config{})
+	if !slices.Contains(env, "GSETTINGS_BACKEND=memory") {
+		t.Error("the discoverer must run with the in-memory settings backend: dconf warns on every run otherwise")
+	}
+
+	// An explicit choice from the environment wins.
+	t.Setenv("GSETTINGS_BACKEND", "keyfile")
+	env = gstDiscovererEnv(Config{})
+	if slices.Contains(env, "GSETTINGS_BACKEND=memory") {
+		t.Error("an explicit GSETTINGS_BACKEND must not be replaced")
 	}
 }

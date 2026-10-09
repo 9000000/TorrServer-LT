@@ -342,6 +342,11 @@ func gstDiscovererEnv(conf Config) []string {
 	env = setEnvValue(env, "LC_ALL", "C.UTF-8")
 	env = setEnvValue(env, "LANGUAGE", "en")
 	env = setEnvValue(env, "GST_DEBUG_NO_COLOR", "1")
+	// Same as quietGSettings for our own process: no dconf warnings from the
+	// discoverer, which also reads proxy settings through GIO.
+	if os.Getenv("GSETTINGS_BACKEND") == "" {
+		env = setEnvValue(env, "GSETTINGS_BACKEND", "memory")
+	}
 
 	roots := gstDiscovererSelectedRoots(conf)
 	pathKey := "PATH"
