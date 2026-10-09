@@ -3,6 +3,7 @@
 package gstreamer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -279,7 +280,17 @@ func (s *Service) Probe(hash string, fileID string) (ProbeInfo, error) {
 			return cached, err
 		}
 		conf := s.currentConfig()
-		result, err := probeSource(sourceURL(conf, hash, fileID), conf)
+		src := sourceURL(conf, hash, fileID)
+		result, err := probeSource(src, conf)
+		if err != nil && probeRetryableError(err) {
+			// A torrent that was just added has nothing to read yet, so
+			// gst-discoverer gives up before the swarm delivers the header.
+			// Pull the parts it needs through the same URL — that is what
+			// prioritises them in the cache — and probe once more.
+			if warmProbeSource(src, torrentFileSize(hash, fileID)) {
+				result, err = probeSource(src, conf)
+			}
+		}
 		if err != nil {
 			return ProbeInfo{}, err
 		}
@@ -342,6 +353,52 @@ func validateProbe(probe ProbeInfo, conf Config) error {
 		return ErrUnsupportedVideo
 	}
 	return nil
+}
+
+// Warming up the source before a second probe attempt: the discoverer reads the
+// container header at the start of the file and, for Matroska, the cues and
+// duration at its end.
+const (
+	probeWarmupHeadBytes = 512 << 10
+	probeWarmupTailBytes = 256 << 10
+	probeWarmupTimeout   = 45 * time.Second
+)
+
+// probeRetryableError reports whether a probe failure can plausibly be fixed by
+// waiting for data. A missing or unusable gst-discoverer cannot.
+func probeRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrServiceClosed) || errors.Is(err, ErrBadSource) {
+		return false
+	}
+	return !errors.Is(err, errDiscovererUnavailable)
+}
+
+// warmProbeSource reads the head (and, when the size is known, the tail) of the
+// file through the stream URL, which makes the cache fetch those pieces first.
+// Best effort: it reports whether anything was read, and never blocks longer
+// than probeWarmupTimeout.
+func warmProbeSource(sourceURL string, fileSize int64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), probeWarmupTimeout)
+	defer cancel()
+
+	head := probeWarmupHeadBytes
+	if fileSize > 0 && int64(head) > fileSize {
+		head = int(fileSize)
+	}
+	if _, err := readHTTPRange(ctx, sourceURL, 0, head); err != nil {
+		gstDebugf("probe warmup: head read failed: %v", err)
+		return false
+	}
+	if fileSize > int64(probeWarmupHeadBytes+probeWarmupTailBytes) {
+		if _, err := readHTTPRange(ctx, sourceURL, fileSize-probeWarmupTailBytes, probeWarmupTailBytes); err != nil {
+			// the header alone is often enough, so keep going
+			gstDebugf("probe warmup: tail read failed: %v", err)
+		}
+	}
+	return true
 }
 
 func torrentFileSize(hash string, fileID string) (size int64) {
