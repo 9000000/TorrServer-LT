@@ -108,7 +108,7 @@ curl -s https://raw.githubusercontent.com/9000000/TorrServer-LT/master/installTo
 - Downgrade to a specific version:
 
   ```bash
-  sudo bash ./installTorrServerLinux.sh --down MatriX.145.LT-1.1.12
+  sudo bash ./installTorrServerLinux.sh --down MatriX.146.LT-1.2.1
   ```
 
 - Remove/uninstall:

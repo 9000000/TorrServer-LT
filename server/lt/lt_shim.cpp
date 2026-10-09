@@ -546,7 +546,7 @@ int lt_last_error_code(void) {
 void lt_free(void *p) { std::free(p); }
 
 size_t lt_shim_version(char *buf, size_t cap) {
-  static const std::string ver = "MatriX.145.LT-1.1.12";
+  static const std::string ver = "MatriX.146.LT-1.2.1";
   return copy_string(ver, buf, cap);
 }
 
