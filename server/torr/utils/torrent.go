@@ -358,20 +358,28 @@ func fetchTrackersFromURL(url string, local []string) ([]string, error) {
 func trackersRefreshLoop() {
 	for {
 		time.Sleep(trackersRefreshInterval)
-		urls := configuredTrackersListURLs()
-		if len(urls) == 0 {
-			continue
-		}
-		gen := trackersFetchGen.Load()
-		local := configuredDefaultTrackers()
-		merged, usedURL, err := fetchTrackersFromURLs(urls, local)
-		if err != nil {
-			log.TLogln("trackerslist refresh failed:", err.Error())
-			continue
-		}
-		remoteCount := len(merged) - len(local)
-		setLoadedTrackers(gen, merged, fmt.Sprintf("trackerslist refreshed from %s: %d remote + %d local", usedURL, remoteCount, len(local)))
+		refreshTrackers()
 	}
+}
+
+// refreshTrackers re-fetches the remote trackers list once and replaces the
+// cache on success. On failure, or when the cache was invalidated meanwhile,
+// the existing cache is kept. Split out of the loop so tests can refresh
+// without starting a goroutine that outlives them.
+func refreshTrackers() {
+	urls := configuredTrackersListURLs()
+	if len(urls) == 0 {
+		return
+	}
+	gen := trackersFetchGen.Load()
+	local := configuredDefaultTrackers()
+	merged, usedURL, err := fetchTrackersFromURLs(urls, local)
+	if err != nil {
+		log.TLogln("trackerslist refresh failed:", err.Error())
+		return
+	}
+	remoteCount := len(merged) - len(local)
+	setLoadedTrackers(gen, merged, fmt.Sprintf("trackerslist refreshed from %s: %d remote + %d local", usedURL, remoteCount, len(local)))
 }
 
 // PeerIDRandom builds a peer id with the given prefix padded to 20 chars

@@ -23,14 +23,17 @@ func Start() {
 			dbSSlPort := strconv.Itoa(settings.BTsets().SslPort)
 			if dbSSlPort != "0" {
 				settings.Args.SslPort = dbSSlPort
+				log.TLogln("HTTPS port", dbSSlPort, "(from settings; override with --sslport)")
 			} else {
-				settings.Args.SslPort = "8091"
+				settings.Args.SslPort = settings.DefaultSslPort
+				log.TLogln("HTTPS port", settings.DefaultSslPort, "(default)")
 			}
 		} else { // store ssl port from params to DB
 			dbSSlPort, err := strconv.Atoi(settings.Args.SslPort)
 			if err == nil {
 				settings.BTsets().SslPort = dbSSlPort
 			}
+			log.TLogln("HTTPS port", settings.Args.SslPort, "(from --sslport, saved to settings)")
 		}
 		// check if ssl cert and key files exist
 		if settings.Args.SslCert != "" && settings.Args.SslKey != "" {
@@ -46,13 +49,16 @@ func Start() {
 	}
 	// http checks
 	if settings.Args.Port == "" {
-		settings.Args.Port = "8090"
+		settings.Args.Port = settings.DefaultPort
 	}
 
-	log.TLogln("Check web port", settings.Args.Port, "on", netbind.Normalize(settings.Args.IPs))
-	if err := netbind.CheckPort(settings.Args.IPs, settings.Args.Port); err != nil {
-		log.TLogln("Cannot bind HTTP port", settings.Args.Port+":", err)
-		os.Exit(1)
+	// --https-only never opens the HTTP port, so it doesn't have to be free
+	if settings.HTTPEnabled() {
+		log.TLogln("Check web port", settings.Args.Port, "on", netbind.Normalize(settings.Args.IPs))
+		if err := netbind.CheckPort(settings.Args.IPs, settings.Args.Port); err != nil {
+			log.TLogln("Cannot bind HTTP port", settings.Args.Port+":", err)
+			os.Exit(1)
+		}
 	}
 	// remove old disk caches
 	go cleanCache()

@@ -100,7 +100,7 @@ type Torrent struct {
 
 // NewTorrent installs a new torrent in the session.
 func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
-	if bt == nil || bt.session == nil {
+	if bt == nil || bt.Session() == nil {
 		return nil, errors.New("torr.NewTorrent: BT client not connected")
 	}
 	if spec == nil {
@@ -169,6 +169,14 @@ func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
 		// not shadow the hash forever — every re-add would get the zombie back
 		// and insta-fail. Its lt torrent is already removed; replace the entry.
 		delete(bt.torrents, spec.InfoHash)
+	}
+
+	// Re-check under the lock: the session may have been torn down between
+	// the check above and here (a settings save disconnects and reconnects),
+	// and AddTorrent on a nil session panics.
+	if bt.session == nil {
+		bt.mu.Unlock()
+		return nil, errors.New("torr.NewTorrent: BT client not connected")
 	}
 
 	lh, err := bt.session.AddTorrent(lt.AddTorrentParams{
@@ -461,7 +469,7 @@ func (t *Torrent) Close() bool {
 	}
 	t.Stat = state.TorrentClosed
 	t.markClosed()
-	if t.lh != nil && t.bt != nil && t.bt.session != nil {
+	if t.lh != nil && t.bt != nil && t.bt.Session() != nil {
 		// Only remove the libtorrent torrent if no OTHER live instance owns
 		// it. A duplicate Torrent that lost an add race (or any stale copy)
 		// shares the same underlying lt torrent with the registered one;

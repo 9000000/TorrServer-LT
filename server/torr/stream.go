@@ -143,7 +143,11 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 		)
 	}
 
-	http.ServeContent(resp, req, file.Path, time.Unix(t.Timestamp, 0), reader)
+	// ServeContent copies in 32 KB chunks; without a buffer that is a Read (and a
+	// cache lookup, and with UseDisk a file read) per chunk. 256 KB amortises those
+	// without letting the reader run far ahead of the client: the lookahead is what
+	// the cache's playhead and the piece priorities are driven by.
+	http.ServeContent(resp, req, file.Path, time.Unix(t.Timestamp, 0), newBufferedStreamReader(reader, streamBufferSize))
 
 	if sets.BTsets() != nil && sets.BTsets().EnableDebug {
 		log.TLogln("torr.Stream: disconnect", "id=", streamID, "remote=", req.RemoteAddr)

@@ -20,7 +20,17 @@ var bts *BTServer
 
 // InitApiHelper is called by BTServer.Connect to publish the engine
 // instance to the rest of this package.
-func InitApiHelper(bt *BTServer) { bts = bt }
+// InitApiHelper publishes the engine handle the API helpers use. Request
+// handlers read bts without synchronisation of their own, so it must be
+// written only when it actually changes: Connect calls this on every
+// settings save with the same receiver, and the repeated assignment is a
+// data race against every in-flight request.
+func InitApiHelper(bt *BTServer) {
+	if bts == bt {
+		return
+	}
+	bts = bt
+}
 
 // LoadTorrent re-adds a DB-only torrent into the running session.
 func LoadTorrent(tor *Torrent) *Torrent {
@@ -381,7 +391,7 @@ func Shutdown() {
 // snapshot fetched through the alert pump (bounded wait, so /stat cannot
 // hang); torrent details come from the same state the web UI uses.
 func WriteStatus(w io.Writer) {
-	if bts == nil || bts.session == nil {
+	if bts == nil || bts.Session() == nil {
 		w.Write([]byte("session not running\n"))
 		return
 	}

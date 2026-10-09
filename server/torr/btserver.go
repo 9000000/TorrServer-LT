@@ -126,8 +126,15 @@ func (bt *BTServer) Disconnect() {
 }
 
 // Session is exposed so the rest of the package can call lt-level
-// operations without re-implementing the wrapper.
-func (bt *BTServer) Session() *lt.Session { return bt.session }
+// operations without re-implementing the wrapper. The read takes bt.mu:
+// Connect and Disconnect replace the pointer (a settings save does both),
+// and an unsynchronised read races with that — and can hand out a session
+// Disconnect is about to close.
+func (bt *BTServer) Session() *lt.Session {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	return bt.session
+}
 
 // GetTorrent returns the in-memory torrent for the given hash (nil if
 // not currently registered with this server — note that database-only
