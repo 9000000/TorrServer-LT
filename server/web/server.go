@@ -1,9 +1,13 @@
 package web
 
 import (
+	"crypto/tls"
+	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"sort"
+	"time"
 
 	gstreamer "server/gstreamer/bridge"
 	"server/netbind"
@@ -38,6 +42,9 @@ import (
 var (
 	BTS      = torr.NewBTS()
 	waitChan = make(chan error)
+
+	// stopRenew stops the self-signed cert renewal loop.
+	stopRenew chan struct{}
 )
 
 //	@title			Swagger Torrserver API
@@ -88,6 +95,7 @@ func Start() {
 	route.GET("/echo", echo)
 
 	api.SetupRoute(route)
+	setupSSLRoutes(route)
 	mcp.Mount(route.Group("/", auth.CheckAuth()))
 	gstreamer.SetupRoute(route)
 	msx.SetupRoute(route)
@@ -112,7 +120,7 @@ func Start() {
 	if settings.Ssl {
 		// Generate a self-signed pair only when none is configured, and never
 		// replace a certificate TorrServer did not generate itself.
-		cert, key, changed, certErr := sslcerts.EnsureCert(settings.BTsets().SslCert, settings.BTsets().SslKey, ips)
+		cert, key, changed, certErr := sslcerts.EnsureCert(settings.BTsets().SslCert, settings.BTsets().SslKey, certIPs())
 		if certErr != nil {
 			// Keep serving plain HTTP instead of taking the whole server down:
 			// the certificate is the user's to fix. settings.Ssl goes off so
@@ -121,42 +129,132 @@ func Start() {
 			log.TLogln("HTTPS disabled, certificate unusable:", certErr)
 			log.TLogln("Fix --sslcert/--sslkey, or clear them in settings to get a self-signed certificate. HTTP keeps running.")
 			settings.Ssl = false
-		} else {
-			if changed {
-				settings.BTsets().SslCert, settings.BTsets().SslKey = cert, key
-				log.TLogln("Saving path to ssl cert and key in db", cert, key)
-				settings.SetBTSets(settings.BTsets())
-			}
-			go func() {
-				for _, ip := range netbind.Normalize(settings.IPs) {
-					addr := netbind.Addr(ip, settings.SslPort)
-					go func(addr string) {
-						log.TLogln("Start https server at", addr)
-						waitChan <- route.RunTLS(addr, cert, key)
-					}(addr)
-				}
-			}()
+		} else if changed {
+			settings.BTsets().SslCert, settings.BTsets().SslKey = cert, key
+			log.TLogln("Saving path to ssl cert and key in db", cert, key)
+			settings.SetBTSets(settings.BTsets())
 		}
 	}
 
-	go func() {
-		if settings.Args != nil && settings.Args.ForceHTTPS && settings.Ssl {
-			for _, ip := range netbind.Normalize(settings.IPs) {
-				addr := netbind.Addr(ip, settings.Port)
-				go func(addr string) {
-					waitChan <- runHTTPRedirectToHTTPS(addr)
-				}(addr)
-			}
-			return
+	if err := startServers(route); err != nil {
+		log.TLogln("Cannot start web server:", err)
+		shutdownServers()
+		waitChan <- err
+	}
+}
+
+// startServers opens the public listeners (HTTPS first, so --https-only can skip
+// HTTP entirely) plus the internal loopback listener.
+func startServers(h http.Handler) error {
+	if settings.Ssl {
+		loader, err := sslcerts.NewLoader(sslCertPaths)
+		if err != nil {
+			return fmt.Errorf("load ssl cert: %w", err)
 		}
-		for _, ip := range netbind.Normalize(settings.IPs) {
-			addr := netbind.Addr(ip, settings.Port)
-			go func(addr string) {
-				log.TLogln("Start http server at", addr)
-				waitChan <- route.Run(addr)
-			}(addr)
+		ln, err := netbind.Listen(settings.IPs, settings.SslPort)
+		if err != nil {
+			return fmt.Errorf("https listen: %w", err)
 		}
-	}()
+		tlsLn, plainLn := splitTLS(ln)
+
+		srv := newServer(h)
+		// MinVersion is left to Go's default (TLS 1.2) so GODEBUG=tls10server=1 still works for old TVs
+		srv.TLSConfig = &tls.Config{GetCertificate: loader.GetCertificate}
+		serve(func() error { return srv.ServeTLS(tlsLn, "", "") })
+
+		// plain HTTP sent to the HTTPS port gets a redirect instead of a TLS error
+		redirect := newServer(httpsRedirectHandler())
+		serve(func() error { return redirect.Serve(plainLn) })
+		logAddrs("Start https server at", settings.SslPort)
+
+		stopRenew = make(chan struct{})
+		go sslcerts.RenewLoop(stopRenew, time.Hour, sslCertPaths, certIPs)
+	}
+
+	startInternalServer(h)
+
+	if !settings.HTTPEnabled() {
+		log.TLogln("HTTPS only: the plain HTTP port", settings.Port, "is not opened")
+		warnSelfSignedStrict("--https-only")
+		return nil
+	}
+
+	ln, err := netbind.Listen(settings.IPs, settings.Port)
+	if err != nil {
+		return fmt.Errorf("http listen: %w", err)
+	}
+	if settings.Args != nil && settings.Args.ForceHTTPS && settings.Ssl {
+		httpMedia := settings.Args.HTTPMedia
+		srv := newServer(forceHTTPSHandler(h, httpMedia))
+		serve(func() error { return srv.Serve(ln) })
+		if httpMedia {
+			logAddrs("Start http server (media only, everything else redirects to https) at", settings.Port)
+			log.TLogln("Warning: --http-media serves stream URLs over plain HTTP; they and Basic auth " +
+				"credentials travel unencrypted. Don't expose the HTTP port to the internet.")
+		} else {
+			logAddrs("Start http server (redirect to https) at", settings.Port)
+			warnSelfSignedStrict("--force-https")
+		}
+		return nil
+	}
+	srv := newServer(h)
+	serve(func() error { return srv.Serve(ln) })
+	logAddrs("Start http server at", settings.Port)
+	return nil
+}
+
+// warnSelfSignedStrict warns when media is only served over HTTPS with the self-signed
+// certificate, which most players and TVs reject.
+func warnSelfSignedStrict(flag string) {
+	if sslcerts.IsGenerated(sslCertPaths()) {
+		log.TLogln("Warning: " + flag + " with a self-signed certificate: media players and TVs " +
+			"usually reject it and won't play. Use a trusted certificate (see README, HTTPS)" +
+			" or, on a trusted network, --force-https --http-media.")
+	}
+}
+
+// startInternalServer serves h over plain HTTP on a random loopback port for
+// TorrServer's requests to itself (ffprobe, GStreamer). Unlike the public HTTP port it is
+// never redirected by --force-https, and it works when --ip excludes loopback. Proxies
+// and port mappings can't target it, as the port changes on every start.
+func startInternalServer(h http.Handler) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.TLogln("Internal loopback listener unavailable, self-requests use the public ports:", err)
+		return
+	}
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	srv := newServer(h)
+	serve(func() error { return srv.Serve(ln) })
+	settings.InternalPort = port
+	log.TLogln("Internal loopback listener at", ln.Addr(), "(TorrServer's own requests only)")
+}
+
+// certIPs are the addresses the self-signed cert must cover: the bound IPs when
+// --ip is given, all local IPs otherwise.
+func certIPs() []string {
+	var bound []string
+	for _, ip := range settings.IPs {
+		if parsed := net.ParseIP(ip); parsed != nil && !parsed.IsUnspecified() {
+			bound = append(bound, ip)
+		} else {
+			return GetLocalIps() // "", 0.0.0.0 or :: bind everything
+		}
+	}
+	if len(bound) == 0 {
+		return GetLocalIps()
+	}
+	return bound
+}
+
+func sslCertPaths() (string, string) {
+	return settings.BTsets().SslCert, settings.BTsets().SslKey
+}
+
+func logAddrs(msg, port string) {
+	for _, ip := range netbind.Normalize(settings.IPs) {
+		log.TLogln(msg, netbind.Addr(ip, port))
+	}
 }
 
 func Wait() error {
@@ -164,6 +262,13 @@ func Wait() error {
 }
 
 func Stop() {
+	// stop accepting requests before tearing down what they depend on
+	if stopRenew != nil {
+		close(stopRenew)
+		stopRenew = nil
+	}
+	shutdownServers()
+	settings.InternalPort = ""
 	gstreamer.Stop()
 	dlna.Stop()
 	bonjour.Stop()

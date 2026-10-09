@@ -18,7 +18,9 @@ export const jacredSearchHost = () => `${torrserverHost}/jacred/search`
 export const jacredTestHost = () => `${torrserverHost}/jacred/test`
 export const tmdbSettingsHost = () => `${torrserverHost}/tmdb/settings`
 export const gstSettingsHost = () => `${torrserverHost}/gst/settings`
+export const mediaBaseHost = () => `${torrserverHost}/mediabase`
 export const wafHost = () => `${torrserverHost}/waf`
+export const sslHost = () => `${torrserverHost}/ssl`
 export const runtimeStatusHost = () => `${torrserverHost}/runtime/status`
 
 export const getTorrServerHost = () => torrserverHost
