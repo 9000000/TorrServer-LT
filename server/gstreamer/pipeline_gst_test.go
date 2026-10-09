@@ -1664,3 +1664,28 @@ func TestTaskWithSegmentSkipsConsumerAfterCancellation(t *testing.T) {
 		t.Fatal("segment consumer was called after request cancellation")
 	}
 }
+
+func TestCueBoundaryToleranceAllowsOneFrame(t *testing.T) {
+	// The muxer cannot emit a negative decode time, so it shortens the first
+	// sample's composition offset instead; the sync frame that matches a cue
+	// boundary then sits up to a frame away from it. A container-scale
+	// tolerance rejected such a segment and answered 502 for the whole file.
+	const ms = uint64(1_000_000)
+	probe := ProbeInfo{Tracks: []TrackInfo{{
+		Type: "video", CapsName: "video/x-h264", FrameRateNum: 25, FrameRateDen: 1,
+	}}}
+	task := &Task{Probe: probe, Cue: &CueTimeline{TimestampScaleNS: ms}}
+	if got, want := cueBoundaryToleranceNS(task), ms+40*ms; got != want {
+		t.Fatalf("tolerance with 25 fps = %d, want %d", got, want)
+	}
+
+	// Without a usable frame rate only the container scale is left.
+	task.Probe = ProbeInfo{Tracks: []TrackInfo{{Type: "video", CapsName: "video/x-h264"}}}
+	if got := cueBoundaryToleranceNS(task); got != ms {
+		t.Fatalf("tolerance without a frame rate = %d, want %d", got, ms)
+	}
+
+	if got := cueBoundaryToleranceNS(nil); got != 1 {
+		t.Fatalf("tolerance without a task = %d, want 1", got)
+	}
+}
