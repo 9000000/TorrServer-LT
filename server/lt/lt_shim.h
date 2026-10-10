@@ -96,7 +96,7 @@ int lt_last_error_code(void);
 void lt_free(void *p);
 
 /* ----- versions ----- */
-/* "MatriX.146.LT-1.2.1" (or whatever the shim build was tagged with) */
+/* "MatriX.146.LT-1.2.2" (or whatever the shim build was tagged with) */
 size_t lt_shim_version(char *buf, size_t cap);
 
 /* libtorrent version, e.g. "2.0.10.0" */
