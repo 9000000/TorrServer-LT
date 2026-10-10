@@ -18,6 +18,10 @@ import (
 
 const gstProbeTimeout = 30 * time.Second
 
+// errDiscovererUnavailable marks a missing gst-discoverer binary. Unlike a
+// probe that found no data, waiting cannot fix it, so it is not retried.
+var errDiscovererUnavailable = errors.New("gst-discoverer unavailable")
+
 var (
 	discovererDurationRe  = regexp.MustCompile(`(?i)Duration:\s*(\d+):(\d+):(\d+)(?:\.(\d+))?`)
 	discovererContainerRe = regexp.MustCompile(`(?i)^(?:container(?:\s+#\d+)?|container[\s-]+format)\s*:\s*(.+)$`)
@@ -338,7 +342,7 @@ func gstDiscovererPathRoot(conf Config) (string, string, error) {
 	if path, err := exec.LookPath(name); err == nil {
 		return path, "", nil
 	}
-	return "", "", fmt.Errorf("%s not found", name)
+	return "", "", fmt.Errorf("%w: %s not found", errDiscovererUnavailable, name)
 }
 
 func gstDiscovererExecutableName() string {
@@ -354,6 +358,11 @@ func gstDiscovererEnv(conf Config) []string {
 	env = setEnvValue(env, "LC_ALL", "C.UTF-8")
 	env = setEnvValue(env, "LANGUAGE", "en")
 	env = setEnvValue(env, "GST_DEBUG_NO_COLOR", "1")
+	// Same as quietGSettings for our own process: no dconf warnings from the
+	// discoverer, which also reads proxy settings through GIO.
+	if os.Getenv("GSETTINGS_BACKEND") == "" {
+		env = setEnvValue(env, "GSETTINGS_BACKEND", "memory")
+	}
 
 	roots := gstDiscovererSelectedRoots(conf)
 	pathKey := "PATH"
