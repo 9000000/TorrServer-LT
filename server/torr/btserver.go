@@ -277,7 +277,10 @@ func (bt *BTServer) handleAlert(a *lt.Alert) {
 	if settings.BTsets() != nil && settings.BTsets().EnableDebug && a.Type != "" {
 		log.Printf("lt: %s — %s", a.Type, a.Message)
 	} else if (a.Category&1) != 0 || strings.Contains(a.Type, "error") || strings.Contains(a.Type, "failed") {
-		log.Printf("lt [%s]: %s", a.Type, a.Message)
+		// Suppress noisy tracker alerts (dead / timeout / unreachable / unregistered trackers) in non-debug mode.
+		if !strings.HasPrefix(a.Type, "tracker_") {
+			log.Printf("lt [%s]: %s", a.Type, a.Message)
+		}
 	}
 	if len(a.Counters) > 0 && (a.Type == "session_stats" || a.Type == "session_stats_alert") {
 		bt.statsMu.Lock()
