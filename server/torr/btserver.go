@@ -88,6 +88,7 @@ func (bt *BTServer) Connect() error {
 	bt.alertDone = make(chan struct{})
 	go bt.alertPump(bt.stopAlert, bt.alertDone)
 	go bt.expireWatch(bt.stopAlert)
+	go bt.upnpWatch(bt.stopAlert)
 
 	InitApiHelper(bt)
 	utils.InitTrackers()
@@ -273,6 +274,51 @@ func (bt *BTServer) expireWatch(stop <-chan struct{}) {
 	}
 }
 
+// upnpWatch periodically refreshes UPnP / NAT-PMP port mappings on the local router.
+// Home routers commonly enforce lease timeouts (30–60 minutes) or purge mappings when
+// background devices sleep; this background worker ensures mappings remain active without
+// requiring the user to manually save settings or disconnect active streams.
+func (bt *BTServer) upnpWatch(stop <-chan struct{}) {
+	// 60 minutes periodic refresh as requested by user.
+	tick := time.NewTicker(60 * time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			bt.RefreshUPnP()
+		}
+	}
+}
+
+// RefreshUPnP re-triggers UPnP / NAT-PMP port mapping on the router without
+// restarting the session or dropping active torrent streams.
+func (bt *BTServer) RefreshUPnP() {
+	if settings.BTsets() != nil && settings.BTsets().DisableUPNP {
+		return
+	}
+	sess := bt.Session()
+	if sess == nil {
+		return
+	}
+
+	// Toggle enable_upnp and enable_natpmp to force libtorrent to drop stale
+	// router state and re-broadcast SSDP M-SEARCH discovery to the gateway.
+	_ = sess.ApplySettings(lt.SessionConfig{
+		"enable_upnp":   false,
+		"enable_natpmp": false,
+	})
+	time.Sleep(300 * time.Millisecond)
+	_ = sess.ApplySettings(lt.SessionConfig{
+		"enable_upnp":   true,
+		"enable_natpmp": true,
+	})
+	if settings.BTsets() != nil && settings.BTsets().EnableDebug {
+		log.Println("torr: auto-renewed UPnP / NAT-PMP port mapping")
+	}
+}
+
 func (bt *BTServer) handleAlert(a *lt.Alert) {
 	if settings.BTsets() != nil && settings.BTsets().EnableDebug && a.Type != "" {
 		log.Printf("lt: %s — %s", a.Type, a.Message)
@@ -437,6 +483,7 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 	cfg["enable_lsd"] = s.EnableLPD
 	cfg["enable_upnp"] = !s.DisableUPNP
 	cfg["enable_natpmp"] = !s.DisableUPNP
+	cfg["upnp_lease_duration"] = 7200
 
 	// TCP / uTP — both follow the user's settings (anacrolix upstream supports uTP
 	// too, via go-libutp, so DisableUTP has the same meaning as in the original).
