@@ -845,7 +845,7 @@ func (c *Cache) streamAnchors() map[string]int {
 				if !s.isFocus || s.belowHead || s.isTail {
 					continue
 				}
-				if d := s.cur - int(g.playhead); (d < 0 || d >= 2) && !inSnapShadow(s) {
+				if d := s.cur - int(g.playhead); (d > aheadP || d < -aheadP) && !inSnapShadow(s) {
 					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
 					g.playhead, g.playheadTime = int64(s.cur), now
 					g.snapCancel = true
@@ -871,8 +871,6 @@ func (c *Cache) streamAnchors() map[string]int {
 			// seek still holds: there the blocked-lead already starts playback fast, and
 			// shortening the hold would re-admit the forward-seek straggler oscillation.)
 			if g.playheadTime != 0 && (ph < playFfirst || ph > playFlast) {
-				g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
-				g.snapCancel = true
 				g.playhead, g.playheadTime = int64(playMin), now
 				out[key] = playMin
 				continue
@@ -890,10 +888,6 @@ func (c *Cache) streamAnchors() map[string]int {
 			// Normal follow-down to a NEAR trailing reader (within a window of the
 			// committed anchor): snap immediately, that is the real playback position.
 			case playMin <= ph && ph-playMin <= aheadP:
-				if ph-playMin >= 2 {
-					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
-					g.snapCancel = true
-				}
 				g.playhead, g.playheadTime = int64(playMin), now
 				out[key] = playMin
 			// A reader a FULL window+ BELOW the committed anchor is either a backward
@@ -904,8 +898,6 @@ func (c *Cache) streamAnchors() map[string]int {
 			// after anchorHoldSec, a straggler ages out (stale) first.
 			case ph-playMin > aheadP:
 				if now-g.playheadTime > anchorHoldSec {
-					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
-					g.snapCancel = true
 					g.playhead, g.playheadTime = int64(playMin), now
 					out[key] = playMin
 				} else {
@@ -916,10 +908,6 @@ func (c *Cache) streamAnchors() map[string]int {
 			// the window snaps to the new position. A small step up is the trailing
 			// connection between chunks — hold briefly, then follow it.
 			case playMin-ph > aheadP || now-g.playheadTime > anchorHoldSec:
-				if playMin-ph >= 2 {
-					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
-					g.snapCancel = true
-				}
 				g.playhead, g.playheadTime = int64(playMin), now
 				out[key] = playMin
 			default:
