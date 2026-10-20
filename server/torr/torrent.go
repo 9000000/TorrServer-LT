@@ -337,16 +337,43 @@ func (t *Torrent) WaitInfo() bool {
 }
 
 // GotInfo wraps WaitInfo with state transitions matching the legacy API.
+// Every stream request calls this, often several at once for one file. Once the info
+// is in, only report it: flipping Stat through TorrentGettingInfo on each call raced
+// with Status, Preload and Close, and could turn a closed torrent back into a working one.
 func (t *Torrent) GotInfo() bool {
-	if t == nil || t.Stat == state.TorrentClosed {
+	if t == nil {
 		return false
 	}
-	if t.Stat == state.TorrentPreload {
+	t.mu.Lock()
+	switch {
+	case t.Stat == state.TorrentClosed:
+		t.mu.Unlock()
+		return false
+	case t.Stat == state.TorrentPreload:
+		t.mu.Unlock()
 		return true
+	case t.Stat == state.TorrentWorking:
+		select {
+		case <-t.gotInfoCh:
+			t.mu.Unlock()
+			t.AddExpiredTime(torrentExpireTimeout())
+			return true
+		default:
+		}
 	}
 	t.Stat = state.TorrentGettingInfo
+	t.mu.Unlock()
+
 	if t.WaitInfo() {
-		t.Stat = state.TorrentWorking
+		t.mu.Lock()
+		if t.Stat == state.TorrentGettingInfo {
+			t.Stat = state.TorrentWorking
+		}
+		closed := t.Stat == state.TorrentClosed
+		t.mu.Unlock()
+		if closed {
+			return false
+		}
 		t.AddExpiredTime(torrentExpireTimeout())
 		// Metadata (and so the release name) is now known — backfill a TMDB
 		// poster for torrents that came in without one (bare magnets, tgbot,

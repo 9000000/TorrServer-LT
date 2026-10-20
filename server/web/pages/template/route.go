@@ -8,10 +8,7 @@ import (
 
 func RouteWebPages(route gin.IRouter) {
 	route.GET("/", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Indexhtml))
-		c.Header("Cache-Control", "no-cache")
-		c.Header("ETag", etag)
-		c.Data(200, "text/html; charset=utf-8", Indexhtml)
+		serve(c, Indexhtml, "text/html; charset=utf-8", false)
 	})
 
 	route.GET("/apple-splash-1125-2436.jpg", func(c *gin.Context) {
@@ -253,10 +250,7 @@ func RouteWebPages(route gin.IRouter) {
 	})
 
 	route.GET("/index.html", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Indexhtml))
-		c.Header("Cache-Control", "no-cache")
-		c.Header("ETag", etag)
-		c.Data(200, "text/html; charset=utf-8", Indexhtml)
+		serve(c, Indexhtml, "text/html; charset=utf-8", false)
 	})
 
 	route.GET("/logo.png", func(c *gin.Context) {
@@ -281,30 +275,18 @@ func RouteWebPages(route gin.IRouter) {
 	})
 
 	route.GET("/site.webmanifest", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Sitewebmanifest))
-		c.Header("Cache-Control", "public, max-age=31536000")
-		c.Header("ETag", etag)
-		c.Data(200, "application/manifest+json", Sitewebmanifest)
+		serve(c, Sitewebmanifest, "application/manifest+json", false)
 	})
 
 	route.GET("/static/js/main.06a5f2fc.js", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Staticjsmain06a5f2fcjs))
-		c.Header("Cache-Control", "public, max-age=31536000")
-		c.Header("ETag", etag)
-		c.Data(200, "text/javascript; charset=utf-8", Staticjsmain06a5f2fcjs)
+		serve(c, Staticjsmain06a5f2fcjs, "text/javascript; charset=utf-8", true)
 	})
 
 	route.GET("/static/js/main.06a5f2fc.js.LICENSE.txt", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Staticjsmain06a5f2fcjsLICENSEtxt))
-		c.Header("Cache-Control", "public, max-age=31536000")
-		c.Header("ETag", etag)
-		c.Data(200, "text/plain; charset=utf-8", Staticjsmain06a5f2fcjsLICENSEtxt)
+		serve(c, Staticjsmain06a5f2fcjsLICENSEtxt, "text/plain; charset=utf-8", true)
 	})
 
 	route.GET("/static/js/main.06a5f2fc.js.map", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Staticjsmain06a5f2fcjsmap))
-		c.Header("Cache-Control", "public, max-age=31536000")
-		c.Header("ETag", etag)
-		c.Data(200, "application/json", Staticjsmain06a5f2fcjsmap)
+		serve(c, Staticjsmain06a5f2fcjsmap, "application/json", true)
 	})
 }
