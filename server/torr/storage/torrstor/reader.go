@@ -486,6 +486,10 @@ func (r *Reader) ensurePieceLocked(piece int, pieceOff int64) error {
 			// old-window piece downloading against the fresh seek target this way.
 			r.cache.priMu.Lock()
 			r.cache.deadlined[piece] = true
+			if next := piece + 1; next < r.cache.NumPieces && next <= r.fileLastPiece() && !r.cache.Have(next) {
+				_ = r.handle.SetPieceDeadline(next, 100, false)
+				r.cache.deadlined[next] = true
+			}
 			r.cache.priMu.Unlock()
 		}
 	}

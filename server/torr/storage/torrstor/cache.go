@@ -34,7 +34,7 @@ const anchorHoldSec = 2
 // (≤ anchorHoldSec). The reader serves as soon as the target piece is resident (no
 // server-side hold for the whole buffer); the concentrated lead arrives right behind it so
 // the player fills its own buffer fast.
-const seekStartBytes = 8 << 20
+const seekStartBytes = 16 << 20
 
 // staleReaderSec is how long (seconds) a connection may go without a Read before
 // the playhead maths ignores it (when the device still has an active connection).
@@ -845,7 +845,7 @@ func (c *Cache) streamAnchors() map[string]int {
 				if !s.isFocus || s.belowHead || s.isTail {
 					continue
 				}
-				if d := s.cur - int(g.playhead); (d > aheadP || d < -aheadP) && !inSnapShadow(s) {
+				if d := s.cur - int(g.playhead); (d < 0 || d >= 2) && !inSnapShadow(s) {
 					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
 					g.playhead, g.playheadTime = int64(s.cur), now
 					g.snapCancel = true
@@ -871,6 +871,8 @@ func (c *Cache) streamAnchors() map[string]int {
 			// seek still holds: there the blocked-lead already starts playback fast, and
 			// shortening the hold would re-admit the forward-seek straggler oscillation.)
 			if g.playheadTime != 0 && (ph < playFfirst || ph > playFlast) {
+				g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
+				g.snapCancel = true
 				g.playhead, g.playheadTime = int64(playMin), now
 				out[key] = playMin
 				continue
@@ -888,6 +890,10 @@ func (c *Cache) streamAnchors() map[string]int {
 			// Normal follow-down to a NEAR trailing reader (within a window of the
 			// committed anchor): snap immediately, that is the real playback position.
 			case playMin <= ph && ph-playMin <= aheadP:
+				if ph-playMin >= 2 {
+					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
+					g.snapCancel = true
+				}
 				g.playhead, g.playheadTime = int64(playMin), now
 				out[key] = playMin
 			// A reader a FULL window+ BELOW the committed anchor is either a backward
@@ -898,6 +904,8 @@ func (c *Cache) streamAnchors() map[string]int {
 			// after anchorHoldSec, a straggler ages out (stale) first.
 			case ph-playMin > aheadP:
 				if now-g.playheadTime > anchorHoldSec {
+					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
+					g.snapCancel = true
 					g.playhead, g.playheadTime = int64(playMin), now
 					out[key] = playMin
 				} else {
@@ -908,6 +916,10 @@ func (c *Cache) streamAnchors() map[string]int {
 			// the window snaps to the new position. A small step up is the trailing
 			// connection between chunks — hold briefly, then follow it.
 			case playMin-ph > aheadP || now-g.playheadTime > anchorHoldSec:
+				if playMin-ph >= 2 {
+					g.prevPlayhead, g.prevSnapMs = g.playhead, nowMs
+					g.snapCancel = true
+				}
 				g.playhead, g.playheadTime = int64(playMin), now
 				out[key] = playMin
 			default:
@@ -1165,15 +1177,10 @@ func (c *Cache) applyStreamPriorities() {
 	// and it never downloads — the read hangs to timeout and the stream freezes for good
 	// (a near-end seek did exactly this).
 	for wp, flast := range blocked {
-		// If the blocked piece is already inside an active window/pin (prio > 0) the
-		// window handles the read-ahead — just keep it most-urgent. If it is an ORPHAN
-		// (prio still 0: a forward/backward seek target the anchor hasn't reached), give
-		// it a short forward lead so the player can start playing here, not crawl one
-		// piece at a time. windowPriority(0) == (top, deadline 0) for the target itself.
-		lead := 0
-		if prios[wp] == 0 {
-			lead = c.seekStartLeadPieces()
-		}
+		// A blocked reader needs its target piece fast AND enough forward lead so the player
+		// can start playing smoothly without stalling piece-by-piece. Always grant the lead
+		// buffer regardless of whether wp was already in a window with a lower priority.
+		lead := c.seekStartLeadPieces()
 		for i := wp; i <= wp+lead && i <= flast && i < c.NumPieces; i++ {
 			prio, dlMs := windowPriority(i - wp)
 			raise(i, prio)
@@ -1371,9 +1378,9 @@ func (c *Cache) ReadaheadPieces() int {
 }
 
 // seekStartLeadPieces is how many pieces BEYOND the seek-target piece make up the seek
-// start buffer (seekStartBytes): ceil(seekStartBytes/pieceLen) - 1. For pieces ≥ 8 MB it
+// start buffer (seekStartBytes): ceil(seekStartBytes/pieceLen) - 1. For pieces ≥ 16 MB it
 // is 0 — the single target piece already covers the buffer, so a seek starts on the first
-// piece; for the common 4 MB pieces it is 1 (target + 1 = 8 MB). applyStreamPriorities
+// piece; for 4 MB pieces it is 3 (target + 3 = 16 MB). applyStreamPriorities
 // forces exactly [target .. target+lead] for a blocked reader so the start buffer fills
 // fast (not diluted across a wide readahead). The reader still serves as soon as the
 // target piece is resident — this only shapes how the swarm fills the pieces behind it.
@@ -1382,7 +1389,7 @@ func (c *Cache) seekStartLeadPieces() int {
 	if plen <= 0 {
 		return 0
 	}
-	n := int((int64(seekStartBytes) + plen - 1) / plen) // ceil(8MB / pieceLen)
+	n := int((int64(seekStartBytes) + plen - 1) / plen) // ceil(16MB / pieceLen)
 	if n < 1 {
 		n = 1
 	}
