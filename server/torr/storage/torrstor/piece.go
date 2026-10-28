@@ -177,12 +177,6 @@ func (p *Piece) ReadAt(b []byte, off int64) (int, error) {
 	return n, err
 }
 
-// expectedSize accounts for the final piece being potentially shorter
-// than PieceLength.
-func (p *Piece) expectedSize() int64 {
-	return p.cache.PieceLength
-}
-
 // release frees the in-memory buffer only. The on-disk file (if any)
 // is preserved so a subsequent Cache.Open on the same hash can resume
 // without re-downloading. Use wipe() to remove the disk file too.

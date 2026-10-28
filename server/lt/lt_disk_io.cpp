@@ -419,6 +419,15 @@ private:
             }
             piece_actual = static_cast<int>(it->second.files->piece_size(job.piece));
         }
+        // piece_size() returns -1 for an out-of-range index; a negative length would
+        // become a huge size_t in the vector below (OOM / crash). Fail the job instead.
+        if (piece_actual <= 0) {
+            auto err = make_io_error("hash:bad-piece");
+            lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
+                h(piece, lt::sha1_hash{}, err);
+            });
+            return;
+        }
         std::vector<char> data(static_cast<size_t>(piece_actual)); // zero-initialised
         int got = cb_.read(storage_id_of(job.s), static_cast<int>(job.piece),
                            0, reinterpret_cast<uint8_t*>(data.data()), piece_actual);

@@ -109,7 +109,9 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	// HTTP / DLNA headers.
 	// Do not force Connection: close — let the player use HTTP keep-alive
 	// for smoother streaming (VLC, MX Player benefit from persistent connections).
-	resp.Header().Set("Connection", "close")
+	// Setting "close" here used to undo exactly that: every range request dropped
+	// the connection, so a per-chunk player re-dialled (and re-handshook) for every
+	// chunk.
 	resp.Header().Set("Server", "TorrServer (Portable SDK for UPnP devices)")
 	resp.Header().Set("transferMode.dlna.org", "Streaming")
 
@@ -130,7 +132,7 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 		resp.Header().Set("Accept-Ranges", "bytes")
 	}
 
-	if sets.BTsets() != nil && sets.BTsets().EnableDebug {
+	if s := sets.BTsets(); s != nil && s.EnableDebug {
 		// group= is the cache-window key this connection was bucketed under: "ss:..."
 		// when the playlist's per-session token was present, "ip:..." on the IP
 		// fallback. Two devices streaming the same torrent must show two DISTINCT
@@ -144,12 +146,12 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	}
 
 	// ServeContent copies in 32 KB chunks; without a buffer that is a Read (and a
-	// cache lookup, and with UseDisk a file read) per chunk. 256 KB amortises those
-	// without letting the reader run far ahead of the client: the lookahead is what
-	// the cache's playhead and the piece priorities are driven by.
+	// cache lookup, and with UseDisk a file read) per chunk. streamBufferSize
+	// amortises those without letting the reader run far ahead of the client: the
+	// lookahead is what the cache's playhead and the piece priorities are driven by.
 	http.ServeContent(resp, req, file.Path, time.Unix(t.Timestamp, 0), newBufferedStreamReader(reader, streamBufferSize))
 
-	if sets.BTsets() != nil && sets.BTsets().EnableDebug {
+	if s := sets.BTsets(); s != nil && s.EnableDebug {
 		log.TLogln("torr.Stream: disconnect", "id=", streamID, "remote=", req.RemoteAddr)
 	}
 	return nil

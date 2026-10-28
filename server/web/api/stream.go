@@ -234,7 +234,7 @@ func stream(c *gin.Context) {
 		// the reader's own window handles. The web "Preload" button (&preload)
 		// already buffered, so skip when it ran.
 		if !preload && shouldPreloadOnPlay(c.Request) {
-			torr.PreloadOnPlay(c.Request.Context(), tor, index)
+			torr.PreloadOnPlay(tor, index)
 		}
 		tor.Stream(index, c.Request, c.Writer)
 		return
@@ -406,7 +406,7 @@ func streamNoAuth(c *gin.Context) {
 	// return play if query
 	if play {
 		if !preload && shouldPreloadOnPlay(c.Request) {
-			torr.PreloadOnPlay(c.Request.Context(), tor, index)
+			torr.PreloadOnPlay(tor, index)
 		}
 		tor.Stream(index, c.Request, c.Writer)
 		return

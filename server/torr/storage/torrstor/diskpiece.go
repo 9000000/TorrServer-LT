@@ -20,6 +20,12 @@ type DiskPiece struct {
 	dir   string
 	name  string
 
+	// dirReady caches the MkdirAll result: writePiece lands one 16 KB block per
+	// call, so re-ensuring the directory on every block cost a syscall per block
+	// for a directory that is created once. Cleared when a write fails with a
+	// missing directory so an externally removed cache dir is re-created.
+	dirReady bool
+
 	mu sync.RWMutex
 }
 
@@ -45,11 +51,20 @@ func (dp *DiskPiece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	dp.mu.Lock()
 	defer dp.mu.Unlock()
-	if err := os.MkdirAll(dp.dir, 0o777); err != nil {
-		return 0, err
+	if !dp.dirReady {
+		if err := os.MkdirAll(dp.dir, 0o777); err != nil {
+			dp.dirReady = false
+			return 0, err
+		}
+		dp.dirReady = true
 	}
 	f, err := os.OpenFile(dp.name, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
+		// The directory may have been removed under us (cache dir cleaned while the
+		// torrent is still stored): re-create it on the next write.
+		if os.IsNotExist(err) {
+			dp.dirReady = false
+		}
 		return 0, err
 	}
 	defer f.Close()

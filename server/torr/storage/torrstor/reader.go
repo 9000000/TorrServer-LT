@@ -337,6 +337,11 @@ func (r *Reader) Read(p []byte) (int, error) {
 	if r.closed {
 		return 0, io.EOF
 	}
+	// Storage torn down (torrent removed) while this stream was open: end the HTTP
+	// body cleanly instead of parking in a piece wait that can only time out.
+	if r.cache.closed.Load() {
+		return 0, io.EOF
+	}
 	r.lastRead.Store(time.Now().Unix()) // mark active for the playhead maths
 	r.reading.Store(true)               // in flight: never "stale" even if a piece is slow
 	defer r.reading.Store(false)

@@ -362,7 +362,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	// Find peers fast: kick trackers + DHT now (the torrent was lazy and lightly
 	// announced until this preload).
 	_ = lh.ForceReannounce()
-	if settings.BTsets() == nil || !settings.BTsets().DisableDHT {
+	if s := settings.BTsets(); s == nil || !s.DisableDHT {
 		_ = lh.ForceDhtAnnounce()
 	}
 
@@ -374,8 +374,8 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	// (an initial play / explicit &preload), never mid-stream — a running stream keeps its
 	// strict cap and pausing/churning peers would hiccup it.
 	configuredConns := 50
-	if settings.BTsets() != nil && settings.BTsets().ConnectionsLimit > 0 {
-		configuredConns = settings.BTsets().ConnectionsLimit
+	if s := settings.BTsets(); s != nil && s.ConnectionsLimit > 0 {
+		configuredConns = s.ConnectionsLimit
 	}
 	if cache.ActiveReaders() == 0 {
 		burst := configuredConns
@@ -569,7 +569,15 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		}
 		select {
 		case <-ctx.Done(): // timeout or torrent closed
-		case <-gateCh: // a gate piece progressed — recheck immediately
+		case _, ok := <-gateCh:
+			// A closed gateCh means every per-piece fan-in goroutine has exited
+			// (all pieces were complete at some point). Selecting on a closed
+			// channel is always ready, so without this the loop would spin at full
+			// CPU until the 2-minute ctx cap when a piece was completed and then
+			// evicted/re-created before GetPiecesState saw it completed.
+			if !ok {
+				gateCh = nil // nil channel blocks forever — fall through to the tick
+			}
 			continue
 		case <-tick.C: // fallback for straggler escalation + progress updates
 			continue
@@ -711,7 +719,10 @@ func (t *Torrent) probeMediaInfo(index int) {
 // TorrServe/Lampa hit) runs the synchronous ffprobe media-info population once
 // the buffer is in; false (a raw &play, tgbot) skips it.
 func Preload(ctx context.Context, torr *Torrent, index int, probe bool) {
-	if torr == nil || settings.BTsets() == nil {
+	// Load the settings pointer ONCE: it is swapped atomically at runtime, so
+	// checking it and then dereferencing separate BTsets() calls can nil-panic.
+	sets := settings.BTsets()
+	if torr == nil || sets == nil {
 		return
 	}
 	// A preload runs detached (PreloadOnPlay) or holds a request (&preload) and can
@@ -723,9 +734,10 @@ func Preload(ctx context.Context, torr *Torrent, index int, probe bool) {
 			log.TLogln("torr.Preload: recovered from panic:", r)
 		}
 	}()
-	cache := float32(settings.BTsets().CacheSize)
-	prc := float32(settings.BTsets().PreloadCache)
-	size := int64((cache / 100.0) * prc)
+	// Integer maths on purpose: CacheSize is an int64 byte count and float32 only
+	// has a 24-bit mantissa, so `float32(CacheSize)/100*prc` silently rounded the
+	// buffer size on every cache above 16 MB.
+	size := sets.CacheSize * int64(sets.PreloadCache) / 100
 	if size <= 0 {
 		return
 	}
@@ -739,23 +751,24 @@ const playGateDebounce = 30 * time.Second
 // PreloadOnPlay buffers the PreloadCache head before an initial &play request
 // starts streaming. It must survive an impatient external player: a raw player
 // opened straight from a web-interface playlist gets a plain &play URL (no
-// two-phase &preload+poll like TorrServe/Lampa), so the handler has to hold the
-// connection through the whole 20-30s fill. Many players give up waiting for the
-// first byte and disconnect or reconnect.
+// two-phase &preload+poll like TorrServe/Lampa), and many players give up
+// waiting for the first byte if the handler holds the connection through the
+// whole 20-30s fill.
 //
 // So the fill runs DETACHED (context.Background) in a goroutine — a disconnect
-// can't abort it — while THIS handler only waits on it bounded by reqCtx: if the
-// player vanishes, the handler returns at once (its tor.Stream then writes to a
-// dead socket and fails fast) and the background fill keeps going. A reconnect
-// for the SAME file finds that in-flight fill and WAITS for it (it never skips
-// the gate onto a half-buffer — the old request-bound code aborted the fill on
-// disconnect and the debounce then made the retry stream partial).
+// can't abort it — and this handler returns as soon as the fill is started, so
+// the player's connection is never held. tor.Stream then registers a reader
+// immediately; the reader's sliding window serves the first bytes as they land
+// while the detached fill keeps buffering the head in the background. A
+// reconnect for the SAME file finds the fill in flight and does not start a
+// second one (the per-file debounce below); the old request-bound code aborted
+// the fill on disconnect, which made the retry stream from a partial buffer.
 //
 // The per-file debounce that suppresses the preload storm of a playlist client
 // walking every episode's &play link is kept, but ONLY for OTHER files: while a
 // fill is in flight, or within playGateDebounce after one, a play for a
 // different file streams directly (swarm is hot, reader's window buffers it).
-func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
+func PreloadOnPlay(torr *Torrent, index int) {
 	if torr == nil || settings.BTsets() == nil {
 		return
 	}
@@ -860,9 +873,9 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 	}
 
 	torr.preloadGateMu.Lock()
-	// A fill for THIS file is already in flight: wait on that same fill, never
-	// start a second one and never skip onto a half-buffer (this is the reconnect
-	// path after an impatient player dropped the first connection).
+	// A fill for THIS file is already in flight: let the new connection stream
+	// immediately against the same fill instead of starting a second one (this is
+	// the reconnect path after an impatient player dropped the first connection).
 	if torr.preloadGateDone != nil && torr.preloadGateIndex == index {
 		torr.preloadGateMu.Unlock()
 		dbg("wait skipped: fill already in flight, resuming stream instantly to revive reader")
@@ -875,7 +888,8 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 		dbg("skip: other-file fill in flight or within debounce")
 		return
 	}
-	// Start a detached fill for this file and remember it so reconnects can wait.
+	// Start a detached fill for this file and remember it so a reconnect sees it
+	// in flight (the channel is a liveness marker, nobody blocks on it).
 	done := make(chan struct{})
 	torr.preloadGateIndex = index
 	torr.preloadGateDone = done
@@ -895,16 +909,6 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 	}()
 
 	dbg("fill started in background, returning instantly to allow reader creation")
-}
-
-// waitBounded blocks until the fill signalled by done completes, or reqCtx is
-// cancelled (the player disconnected) — whichever first. Returning early on
-// cancel only releases THIS handler; the detached fill behind done keeps running.
-func waitBounded(reqCtx context.Context, done <-chan struct{}) {
-	select {
-	case <-done:
-	case <-reqCtx.Done():
-	}
 }
 
 // fileByID resolves the 1-based API file id (FileStats.Id) to its *File, the
@@ -937,11 +941,16 @@ func (t *Torrent) fileByID(index int) *File {
 // preloadHeadLastPiece is the last torrent piece of file f's playback head
 // buffer (PreloadCache % of CacheSize from the file start) — the piece the
 // preload finishes last. If it's resident the buffer is satisfied. Caller
-// guarantees settings.BTsets() != nil and plen > 0.
+// guarantees plen > 0.
 func preloadHeadLastPiece(f *File, plen int64, numPieces int) int {
-	cacheB := float32(settings.BTsets().CacheSize)
-	prc := float32(settings.BTsets().PreloadCache)
-	size := int64((cacheB / 100.0) * prc)
+	// Same integer maths Preload uses for the head buffer: the two must land on
+	// the SAME piece, or the "is the head already resident?" check reads a piece
+	// the fill never buffered (float32 loses precision above 16 MB).
+	s := settings.BTsets()
+	if s == nil {
+		return -1 // no settings: report "not resident" rather than piece 0
+	}
+	size := s.CacheSize * int64(s.PreloadCache) / 100
 	if size > f.Length {
 		size = f.Length
 	}

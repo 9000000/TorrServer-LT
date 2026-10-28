@@ -169,14 +169,14 @@ type Cache struct {
 	waitFocusMu sync.Mutex
 	waitFocus   map[string]waitFocusEntry
 
-	// evicting single-flights evictIfOverCapacity: at most one pass runs at a time.
-	// writePiece spawns a pass on EVERY 16 KB block, so without this a fast download
-	// fires hundreds of overlapping passes per second, each doing a full anchor walk
-	// under readersMu and contending with the streaming Read path. evictAgain records a
-	// trigger that arrived while a pass held the guard, so the running worker re-runs and
-	// trims the blocks that landed mid-pass — otherwise filled could drift above cap
-	// between passes instead of being driven back down to the budget.
-	evicting   atomic.Bool
+	// evictMu single-flights eviction passes: at most one runs at a time. writePiece
+	// triggers one on every 16 KB block, so without this a fast download fires
+	// hundreds of overlapping passes per second, each doing a full anchor walk under
+	// readersMu and contending with the streaming Read path. evictAgain records a
+	// trigger that arrived while a pass held the mutex, so the running worker re-runs
+	// and trims the blocks that landed mid-pass — otherwise filled could drift above
+	// cap between passes instead of being driven back down to the budget.
+	evictMu    sync.Mutex
 	evictAgain atomic.Bool
 }
 
@@ -362,15 +362,19 @@ func (c *Cache) SignalPieceComplete(piece int) {
 // libtorrent reports `hash_failed_alert` for this torrent. Wipes
 // the corrupt piece from memory so libtorrent can re-download clean blocks.
 func (c *Cache) SignalHashFailed(piece int) {
+	// Bound against NumPieces, NOT len(c.pieces): the map only holds the pieces
+	// currently materialised (the streaming window), so a failed piece that sits
+	// outside it (e.g. the 300th piece of a torrent with 5 resident) compared
+	// false against the map length and the corrupt data was left in place — the
+	// reader then served bytes that libtorrent had already rejected.
+	if piece < 0 || piece >= c.NumPieces {
+		return
+	}
 	c.mu.RLock()
-	if piece >= 0 && piece < len(c.pieces) {
-		p := c.pieces[piece]
-		c.mu.RUnlock()
-		if p != nil {
-			p.wipe()
-		}
-	} else {
-		c.mu.RUnlock()
+	p := c.pieces[piece]
+	c.mu.RUnlock()
+	if p != nil {
+		p.wipe()
 	}
 	c.signalPieceProgress(piece)
 }
@@ -546,7 +550,7 @@ func (c *Cache) unregisterReader(r *Reader) {
 		if h := c.handle.Load(); h != nil {
 			_ = h.SetMaxConnections(configuredConnLimit())
 		}
-		go c.evictIfOverCapacity()
+		c.kickEvict()
 	}
 }
 
@@ -1479,7 +1483,11 @@ func (c *Cache) close() {
 	for _, p := range c.pieces {
 		p.release()
 	}
-	c.pieces = nil
+	// Keep an EMPTY (non-nil) map: writePiece/readPiece can still run for a block
+	// or a disk read that was already in flight when libtorrent removed the
+	// torrent, and assigning into a nil map panics — it took the whole server
+	// down instead of dropping one straggler block.
+	c.pieces = map[int]*Piece{}
 	c.mu.Unlock()
 }
 
@@ -1523,6 +1531,9 @@ func (c *Cache) scanLocalPieces() {
 // Piece from disk when we're in UseDisk mode and the file is present —
 // this is the resume read-path for pieces our scan flagged as "have".
 func (c *Cache) readPiece(piece int, offset int64, dst []byte) (int, error) {
+	if c.closed.Load() {
+		return 0, errOutOfPiece
+	}
 	c.mu.RLock()
 	p := c.pieces[piece]
 	c.mu.RUnlock()
@@ -1531,6 +1542,10 @@ func (c *Cache) readPiece(piece int, offset int64, dst []byte) (int, error) {
 			return 0, errOutOfPiece
 		}
 		c.mu.Lock()
+		if c.closed.Load() {
+			c.mu.Unlock()
+			return 0, errOutOfPiece
+		}
 		if p = c.pieces[piece]; p == nil {
 			candidate := newPiece(c, piece)
 			if candidate.SizeBytes() > 0 {
@@ -1553,6 +1568,13 @@ func (c *Cache) writePiece(piece int, offset int64, src []byte) (int, error) {
 		return 0, errOutOfPiece
 	}
 	c.mu.Lock()
+	if c.closed.Load() {
+		// The storage was closed (torrent removed) while this block was in flight.
+		// Report it written so libtorrent isn't handed a storage_error (which it
+		// treats as disk corruption) — the piece simply never materialises.
+		c.mu.Unlock()
+		return len(src), nil
+	}
 	p := c.pieces[piece]
 	if p == nil {
 		// A block that was in flight when we abandoned this piece on a seek still
@@ -1578,7 +1600,7 @@ func (c *Cache) writePiece(piece int, offset int64, src []byte) (int, error) {
 		// mutex) when nobody waits; the waiter re-checks its predicate, so waking on
 		// a block that doesn't cover its offset just re-parks it.
 		c.signalPieceProgress(piece)
-		go c.evictIfOverCapacity()
+		c.kickEvict()
 	}
 	return n, err
 }
@@ -1605,28 +1627,41 @@ func (c *Cache) clearAbandoned(piece int) {
 // to evict; if every spare piece is somehow protected we leave the cache a touch
 // over budget rather than evict the playing window.
 func (c *Cache) evictIfOverCapacity() {
-	// Single-flight: at most one eviction pass runs at a time. writePiece spawns a pass
-	// on EVERY 16 KB block, so a fast download would otherwise fire hundreds of
-	// overlapping passes per second, each doing a full reader + anchor walk
-	// (readerProtectRanges) under readersMu and contending with the streaming Read path.
-	if !c.evicting.CompareAndSwap(false, true) {
-		// A pass is already running. Record that more work arrived so it re-runs after
-		// finishing, instead of dropping this trigger — that re-run is what keeps filled
-		// from drifting above cap between passes under a fast download.
+	// Strictly synchronous: block until any in-flight async pass finishes, then run a
+	// pass of our own. Callers that must observe the trim on return (unregisterReader,
+	// disk_test) rely on this — the earlier CAS version returned immediately when an
+	// async trigger happened to hold the guard, leaving filled above cap at return.
+	c.evictMu.Lock()
+	defer c.evictMu.Unlock()
+	c.evictLoop()
+}
+
+// kickEvict is the non-blocking trigger used by the disk-write path. Unlike
+// `go c.evictIfOverCapacity()` it spawns NO goroutine when a pass is already
+// running (it only sets evictAgain), so a fast download no longer creates one
+// goroutine per 16 KB block — at most one eviction goroutine exists at a time.
+func (c *Cache) kickEvict() {
+	if !c.evictMu.TryLock() {
 		c.evictAgain.Store(true)
 		return
 	}
+	go func() {
+		defer c.evictMu.Unlock()
+		c.evictLoop()
+	}()
+}
+
+// evictLoop runs passes until no more work is pending. The caller must hold evictMu.
+func (c *Cache) evictLoop() {
 	for {
 		c.evictAgain.Store(false)
 		evicted := c.evictPass()
-		c.evicting.Store(false)
 		// Re-run only while passes are actually freeing space AND a trigger arrived
-		// mid-pass (its CompareAndSwap failed, so it set evictAgain). A pass that evicted
+		// mid-pass (its TryLock failed, so it set evictAgain). A pass that evicted
 		// nothing is already at/under cap — stop, and let the next over-cap write
 		// re-trigger a fresh pass; this drives filled down to the budget under coalesced
 		// triggers without spinning empty passes during the cache-fill ramp (filled < cap).
-		// The re-acquire hands the loop to whichever goroutine wins, so exactly one runs.
-		if !evicted || !c.evictAgain.Load() || !c.evicting.CompareAndSwap(false, true) {
+		if !evicted || !c.evictAgain.Load() {
 			return
 		}
 	}
@@ -1634,8 +1669,8 @@ func (c *Cache) evictIfOverCapacity() {
 
 // evictPass is one capacity-trim pass: reap stranded incomplete leftovers, then LRU-evict
 // complete pieces until filled<=cap, never touching a protected window/pin. Returns
-// whether it evicted anything, so the single-flight loop in evictIfOverCapacity knows
-// whether another pass could free more. The caller holds the evicting guard.
+// whether it evicted anything, so evictLoop knows whether another pass could free more.
+// The caller holds evictMu.
 func (c *Cache) evictPass() (evictedAny bool) {
 	// Build the protect set ONCE and derive capacity from it (capacityFor), instead of
 	// capacity() and readerProtectRanges() each walking the readers + recomputing every
@@ -2011,7 +2046,7 @@ func (c *Cache) ClearPreloadReserve() {
 	}
 	c.preloadProtect = nil
 	c.preloadMu.Unlock()
-	go c.evictIfOverCapacity()
+	c.kickEvict()
 }
 
 // Have reports whether the piece has been fully written to the cache.
@@ -2146,6 +2181,3 @@ func hashHex(h [20]byte) string {
 	}
 	return string(out)
 }
-
-// touch is a placeholder for the LRU bookkeeping that lands in 4.2.
-func (c *Cache) touch(_ int) { _ = time.Now() }
