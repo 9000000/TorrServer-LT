@@ -76,7 +76,7 @@ const stragglerEscalatePieces = 8
 // at once" leak. Not used on the &play path (probe=false): there the reader
 // connects in the SAME request right after the gate, so there is no gap to bridge
 // and lingering would only delay the stream.
-const preloadWarmGrace = 8 * time.Second
+const preloadWarmGrace = 15 * time.Second
 
 // Preload (Torrent method) eagerly downloads the first `size` bytes of file
 // `index` so playback starts with a buffer. Because the torrent sits at piece
@@ -562,16 +562,12 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	}
 	t.mu.Unlock()
 
-	// Poll-gap prefetch (&preload path only). Keep the burst alive and build a
-	// readahead window PAST the head while the polling client launches its player,
-	// so the swarm doesn't go cold in the 1-3s gap before the reader connects (see
-	// preloadWarmGrace). Skipped on the &play path (probe=false), where the reader
-	// connects in the same request, and skipped once a stream is already live.
-	var warmPieces []int
-	if probe && preloadOK && cache.StreamingReaders() == 0 {
-		// Only prefetch what fits in the cache ALONGSIDE the protected head+tail —
-		// at a fat PreloadCache the head already fills the budget, leaving no room,
-		// so we'd just churn pieces in and straight back out. budget/used in pieces.
+	// Seamless handoff:
+	// Keep the swarm hot and actively download a readahead window PAST the head
+	// while the client launches the player.
+	// We run this in a background goroutine so Preload returns immediately to the HTTP
+	// caller, bridging the gap without stalling or dropping fast seed connections.
+	if preloadOK {
 		budget := int(0)
 		if s := settings.BTsets(); s != nil && s.CacheSize > 0 {
 			budget = int(s.CacheSize / plen)
@@ -579,56 +575,62 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		used := (headLast - headFirst + 1) + (tailLast - tailFirst + 1)
 		room := budget - used
 		warmCount := min(cache.ReadaheadPieces(), room)
+		if warmCount < 4 {
+			warmCount = 4
+		}
 		fileLast := clamp(int((f.Offset + f.Length - 1) / plen))
+		var warmPieces []int
 		for p := headLast + 1; p <= headLast+warmCount && p <= fileLast; p++ {
-			if p < tailFirst { // the tail is already pinned/deadlined — don't double-touch
+			if p < tailFirst { // the tail is already pinned/deadlined
 				warmPieces = append(warmPieces, p)
 			}
 		}
-	}
-	if len(warmPieces) > 0 {
-		warmCtx, warmCancel := context.WithTimeout(context.Background(), preloadWarmGrace)
-		warmTick := time.NewTicker(time.Second)
-		lead := min(headDeadlineLeadPieces, len(warmPieces))
-		for {
-			// Re-assert each tick: deadlines are relative to now and expire. The lead of
-			// the prefetch races (deadlines); the rest fills in order via sequential.
-			prioritise(warmPieces[:lead], 0)
-			if lead < len(warmPieces) {
-				prioritiseNoDeadline(warmPieces[lead:])
-			}
-			if cache.StreamingReaders() > 0 { // the player connected — it owns scheduling now
-				break
-			}
-			select {
-			case <-warmCtx.Done(): // grace elapsed or torrent closing
-			case <-t.closeCh:
-			case <-warmTick.C:
-				continue
-			}
-			break
-		}
-		warmTick.Stop()
-		warmCancel()
-	}
 
-	// Hand the buffer back to reader-driven scheduling: drop the preload's forced
-	// priority + deadline on every gate piece (SetPiecePriority 0 also clears the
-	// piece's deadline in libtorrent). Without this the head+tail pieces stay at
-	// priority 7 forever, so on a multi-file torrent EVERY file ever play-gated
-	// keeps its head buffer downloading in parallel with the one actually playing
-	// — observed: the heads of all 5 episodes fetching at once while only E01 was
-	// played ("downloading pieces everywhere"). The just-buffered pieces stay
-	// cached (the preload reserve, then the joining reader, protect them); the
-	// active file's reader re-raises priority on its live window via
-	// scheduleWindow, so the played file is unaffected while idle files go quiet.
-	// The poll-gap prefetch window is released the same way (it never joined the
-	// reserve, so it is plain prefetch the joining reader's window re-covers).
-	for _, p := range gatePieces {
-		_ = lh.SetPiecePriority(p, 0)
-	}
-	for _, p := range warmPieces {
-		_ = lh.SetPiecePriority(p, 0)
+		go func(gPieces, wPieces []int) {
+			warmCtx, warmCancel := context.WithTimeout(context.Background(), preloadWarmGrace)
+			defer warmCancel()
+			warmTick := time.NewTicker(time.Second)
+			defer warmTick.Stop()
+
+			lead := min(headDeadlineLeadPieces, len(wPieces))
+			for {
+				if len(wPieces) > 0 {
+					prioritise(wPieces[:lead], 0)
+					if lead < len(wPieces) {
+						prioritiseNoDeadline(wPieces[lead:])
+					}
+				}
+
+				// If a streaming reader has joined, it owns scheduling now (via applyStreamPriorities).
+				// Exit cleanly WITHOUT zeroing out priorities, allowing the reader to seamlessly
+				// inherit the hot swarm and active download window.
+				if cache.StreamingReaders() > 0 {
+					return
+				}
+
+				select {
+				case <-warmCtx.Done():
+					// Grace period elapsed without any player connecting:
+					// Zero out priorities so an abandoned preload doesn't leak bandwidth.
+					for _, p := range gPieces {
+						_ = lh.SetPiecePriority(p, 0)
+					}
+					for _, p := range wPieces {
+						_ = lh.SetPiecePriority(p, 0)
+					}
+					return
+				case <-t.closeCh:
+					return
+				case <-warmTick.C:
+					continue
+				}
+			}
+		}(gatePieces, warmPieces)
+	} else {
+		// Preload failed or was cancelled: clean up immediately.
+		for _, p := range gatePieces {
+			_ = lh.SetPiecePriority(p, 0)
+		}
 	}
 
 	log.TLogln("torr.Preload:", t.Name(), "buffered head", headFirst, "..", headLast,
