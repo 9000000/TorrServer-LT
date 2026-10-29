@@ -334,6 +334,9 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	// goes first; the rest of the head is prioritised after ffprobe, in the gate loop.
 	if twoPhase {
 		prioritise(headPieces[:probeHeadCount], tailExtra)
+		if probeHeadCount < len(headPieces) {
+			prioritiseNoDeadline(headPieces[probeHeadCount:])
+		}
 	} else {
 		lead := headDeadlineLeadPieces
 		if lead > len(headPieces) {
@@ -345,17 +348,10 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		}
 	}
 
-	// libtorrent hack (cf. elementum): pause+resume kicks the piece picker so it
-	// re-evaluates and starts requesting the freshly-prioritised buffer pieces
-	// immediately, instead of waiting for its next tick. Only done here, at
-	// buffer startup — never per scheduleWindow (that would churn peers). And
-	// never while another client is actively streaming this torrent: pausing
-	// drops every peer connection, hiccuping the running stream, and the swarm
-	// is already hot — the picker will pull the new buffer without the kick.
-	if cache.ActiveReaders() == 0 {
-		_ = lh.Pause()
-		_ = lh.Resume()
-	}
+	// In libtorrent 2.x, SetPieceDeadline immediately schedules time-critical requests.
+	// We deliberately do NOT call lh.Pause()/lh.Resume() here: pause() in libtorrent 2.x
+	// closes all active peer connections, causing peers and download speed to collapse
+	// to 0 when preload starts.
 
 	// Find peers fast: kick trackers + DHT now (the torrent was lazy and lightly
 	// announced until this preload).
