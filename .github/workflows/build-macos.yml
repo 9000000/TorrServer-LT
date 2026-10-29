@@ -55,7 +55,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _src
-          key: src-boost1.85.0-lt2.1.0-ossl3.5.7-v1
+          key: src-boost1.85.0-lt2.1.2-ossl3.5.7-v1
 
       # Per-arch install tree (lib + headers + .pc). With it present the b2
       # step short-circuits and only the Go binaries are relinked.
@@ -63,7 +63,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _deps/darwin-${{ matrix.arch }}
-          key: deps-darwin-${{ matrix.arch }}-boost1.85.0-lt2.1.0-ossl3.5.7-v1
+          key: deps-darwin-${{ matrix.arch }}-boost1.85.0-lt2.1.2-ossl3.5.7-v1
 
       - name: Set up Go
         uses: actions/setup-go@v5

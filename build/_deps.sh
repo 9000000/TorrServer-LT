@@ -294,6 +294,7 @@ PYEOF
 # pure Go (purego dlopen at runtime, no build-time linkage), so the variant
 # differs only by the build tag; other targets ship the stub-only base binary.
 gst_variant_wanted() {
+    [ "${SKIP_GST:-0}" = "1" ] && return 1
     case "$GOOS/$GOARCH" in
         linux/amd64 | linux/arm64 | windows/amd64 | darwin/amd64 | darwin/arm64) return 0 ;;
         *) return 1 ;;
@@ -330,9 +331,10 @@ go_build() {
             PKG_CONFIG_PATH="$deps/lib/pkgconfig" \
             PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" \
             CGO_CFLAGS="-DTS_PC_STAMP=$pc_stamp" \
-            CGO_CXXFLAGS="-DTS_PC_STAMP=$pc_stamp -DTSL_HAVE_LT_INTERNALS" \
+            CGO_CXXFLAGS="-DTS_PC_STAMP=$pc_stamp -DTSL_HAVE_LT_INTERNALS ${EXTRA_CGO_CXXFLAGS:-}" \
             CGO_LDFLAGS="-L$deps/lib ${EXTRA_CGO_LDFLAGS:-}" \
             go build \
+            -trimpath \
             "$@" \
             -ldflags "-s -w ${EXTRA_GO_LDFLAGS:-} -X server/version.Version=${TS_VERSION}" \
             -o "$target_out" \
@@ -362,7 +364,7 @@ cross_build() {
     # (2.0.13, no OpenSSL) would silently survive a version bump. Stamp the
     # tree with the exact recipe and nuke it on mismatch.
     local stamp="$deps/.stamp"
-    local want="lt=$LIBTORRENT_TAG openssl=$OPENSSL_VERSION webtorrent=on"
+    local want="lt=$LIBTORRENT_TAG openssl=$OPENSSL_VERSION webtorrent=on b2=${B2_FLAGS:-}"
     if [[ -e "$deps" && "$(cat "$stamp" 2>/dev/null || true)" != "$want" ]]; then
         log "deps tree for $TARGET is stale (want: $want) — rebuilding"
         rm -rf "$deps"

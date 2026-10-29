@@ -50,6 +50,10 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 			break
 		}
 	}
+	if stFile == nil && len(st.FileStats) == 1 && fileID == 1 {
+		stFile = st.FileStats[0]
+		fileID = stFile.Id
+	}
 	if stFile == nil {
 		err := fmt.Errorf("torr.Stream: file id %d not found", fileID)
 		http.Error(resp, err.Error(), http.StatusNotFound)

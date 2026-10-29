@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -87,8 +88,10 @@ func (bt *BTServer) Connect() error {
 	bt.alertDone = make(chan struct{})
 	go bt.alertPump(bt.stopAlert, bt.alertDone)
 	go bt.expireWatch(bt.stopAlert)
+	go bt.upnpWatch(bt.stopAlert)
 
 	InitApiHelper(bt)
+	utils.InitTrackers()
 	return nil
 }
 
@@ -271,9 +274,59 @@ func (bt *BTServer) expireWatch(stop <-chan struct{}) {
 	}
 }
 
+// upnpWatch periodically refreshes UPnP / NAT-PMP port mappings on the local router.
+// Home routers commonly enforce lease timeouts (30–60 minutes) or purge mappings when
+// background devices sleep; this background worker ensures mappings remain active without
+// requiring the user to manually save settings or disconnect active streams.
+func (bt *BTServer) upnpWatch(stop <-chan struct{}) {
+	// 60 minutes periodic refresh as requested by user.
+	tick := time.NewTicker(60 * time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			bt.RefreshUPnP()
+		}
+	}
+}
+
+// RefreshUPnP re-triggers UPnP / NAT-PMP port mapping on the router without
+// restarting the session or dropping active torrent streams.
+func (bt *BTServer) RefreshUPnP() {
+	if settings.BTsets() != nil && settings.BTsets().DisableUPNP {
+		return
+	}
+	sess := bt.Session()
+	if sess == nil {
+		return
+	}
+
+	// Toggle enable_upnp and enable_natpmp to force libtorrent to drop stale
+	// router state and re-broadcast SSDP M-SEARCH discovery to the gateway.
+	_ = sess.ApplySettings(lt.SessionConfig{
+		"enable_upnp":   false,
+		"enable_natpmp": false,
+	})
+	time.Sleep(300 * time.Millisecond)
+	_ = sess.ApplySettings(lt.SessionConfig{
+		"enable_upnp":   true,
+		"enable_natpmp": true,
+	})
+	if settings.BTsets() != nil && settings.BTsets().EnableDebug {
+		log.Println("torr: auto-renewed UPnP / NAT-PMP port mapping")
+	}
+}
+
 func (bt *BTServer) handleAlert(a *lt.Alert) {
 	if settings.BTsets() != nil && settings.BTsets().EnableDebug && a.Type != "" {
 		log.Printf("lt: %s — %s", a.Type, a.Message)
+	} else if (a.Category&1) != 0 || strings.Contains(a.Type, "error") || strings.Contains(a.Type, "failed") {
+		// Suppress noisy tracker alerts (dead / timeout / unreachable / unregistered trackers) in non-debug mode.
+		if !strings.HasPrefix(a.Type, "tracker_") {
+			log.Printf("lt [%s]: %s", a.Type, a.Message)
+		}
 	}
 	if len(a.Counters) > 0 && (a.Type == "session_stats" || a.Type == "session_stats_alert") {
 		bt.statsMu.Lock()
@@ -312,9 +365,28 @@ func (bt *BTServer) handleAlert(a *lt.Alert) {
 // shim hands to libtorrent's settings_pack. Settings are best-effort: any
 // unrecognised key is silently ignored on the C++ side.
 func buildSessionConfig() (lt.SessionConfig, error) {
+	connSpeed := 250
+	torrentConnectBoost := 100
+	peerConnectTimeout := 12
+	maxPeerlistSize := 50000
+
+	// On Android (phones and TV boxes), an aggressive connection burst (250/s) easily
+	// exhausts Bionic socket buffers, overwhelms cheap Wi-Fi chipsets/drivers, and triggers
+	// home router SYN-flood throttling, leading to connection timeouts and dropped peers.
+	// We tune these parameters to stable, reliable values for mobile/TV while maintaining high throughput.
+	if runtime.GOOS == "android" {
+		connSpeed = 60
+		torrentConnectBoost = 40
+		peerConnectTimeout = 12
+		maxPeerlistSize = 10000
+	}
+
 	cfg := lt.SessionConfig{
 		"user_agent":       "qBittorrent/4.3.9",
 		"peer_fingerprint": "-qB4390-",
+
+		// Global DHT bootstrap routers to guarantee instant DHT bootstrap across regions
+		"dht_bootstrap_nodes": "router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.libtorrent.org:25401,dht.aelitis.com:6881",
 
 		// Streaming-tuned defaults (cf. elgatito/elementum). These trade some
 		// bandwidth politeness for fast start/seek: find peers quickly, keep
@@ -348,8 +420,8 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		"max_allowed_in_request_queue": 2000, // libtorrent default
 		"send_buffer_watermark":        500 * 1024,
 		"send_buffer_watermark_factor": 50,
-		"connection_speed":             250, // outgoing connection attempts per second (default 30)
-		"max_peerlist_size":            50000,
+		"connection_speed":             connSpeed,
+		"max_peerlist_size":            maxPeerlistSize,
 		"max_pex_peers":                200,
 		"dht_upload_rate_limit":        50000,
 		"mixed_mode_algorithm":         0, // prefer_tcp: steadier throughput for streaming
@@ -357,8 +429,8 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		// Swarm ramp-up: connect to many peers immediately and fail the dead
 		// ones fast, so the first seconds of playback see the full swarm
 		// instead of trickling in at libtorrent's polite defaults.
-		"torrent_connect_boost":             100, // peers to try the moment a torrent is added (default 30)
-		"peer_connect_timeout":              7,   // give up on unreachable peers sooner (default 15)
+		"torrent_connect_boost":             torrentConnectBoost,
+		"peer_connect_timeout":              peerConnectTimeout,
 		"piece_timeout":                     10,  // re-request a slow block from another peer sooner (default 20)
 		"min_reconnect_time":                10,  // retry failed peers sooner (default 60)
 		"allow_multiple_connections_per_ip": true,
@@ -405,6 +477,7 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 	cfg["enable_lsd"] = s.EnableLPD
 	cfg["enable_upnp"] = !s.DisableUPNP
 	cfg["enable_natpmp"] = !s.DisableUPNP
+	cfg["upnp_lease_duration"] = 7200
 
 	// TCP / uTP — both follow the user's settings (anacrolix upstream supports uTP
 	// too, via go-libutp, so DisableUTP has the same meaning as in the original).

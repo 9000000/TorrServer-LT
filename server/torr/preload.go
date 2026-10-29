@@ -880,6 +880,9 @@ func (t *Torrent) fileByID(index int) *File {
 			break
 		}
 	}
+	if path == "" && len(t.Status().FileStats) == 1 && index == 1 {
+		path = t.Status().FileStats[0].Path
+	}
 	if path == "" {
 		return nil
 	}

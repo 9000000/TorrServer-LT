@@ -1,0 +1,108 @@
+name: Build & Push Docker GStreamer Image
+
+on:
+  push:
+    branches: [ master, main ]
+    tags: [ 'v*', 'MatriX*' ]
+  workflow_dispatch:
+    inputs:
+      build_amd64:
+        description: "Build linux/amd64"
+        type: boolean
+        required: false
+        default: true
+      build_arm64:
+        description: "Build linux/arm64"
+        type: boolean
+        required: false
+        default: true
+      custom_tag:
+        description: "Additional docker tag (optional, e.g. v1.0.0)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker GST
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute platforms & tags
+        id: prep
+        run: |
+          PLATFORMS=()
+          
+          # Check workflow_dispatch inputs or default to both on push/tag
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ inputs.build_amd64 }}" = "true" ] && PLATFORMS+=("linux/amd64")
+            [ "${{ inputs.build_arm64 }}" = "true" ] && PLATFORMS+=("linux/arm64")
+          else
+            PLATFORMS=("linux/amd64" "linux/arm64")
+          fi
+
+          if [ ${#PLATFORMS[@]} -eq 0 ]; then
+            echo "No platforms selected!"
+            exit 1
+          fi
+
+          # Join array with comma
+          IFS=',' ; PLATFORM_STR="${PLATFORMS[*]}" ; unset IFS
+          echo "platforms=${PLATFORM_STR}" >> "$GITHUB_OUTPUT"
+          echo "Selected platforms: ${PLATFORM_STR}"
+
+          # Prepare Docker Tags
+          TAGS=()
+          TAGS+=("docker.io/matrix37/tor-lt:gst")
+          TAGS+=("ghcr.io/9000000/tor-lt:gst")
+
+          # Add versioned tag if present
+          if [ -n "${{ inputs.custom_tag }}" ]; then
+            TAGS+=("docker.io/matrix37/tor-lt:${{ inputs.custom_tag }}-gst")
+            TAGS+=("ghcr.io/9000000/tor-lt:${{ inputs.custom_tag }}-gst")
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${github.ref_name}"
+            TAGS+=("docker.io/matrix37/tor-lt:${TAG_NAME}-gst")
+            TAGS+=("ghcr.io/9000000/tor-lt:${TAG_NAME}-gst")
+          fi
+
+          IFS=',' ; TAGS_STR="${TAGS[*]}" ; unset IFS
+          echo "tags=${TAGS_STR}" >> "$GITHUB_OUTPUT"
+          echo "Target tags: ${TAGS_STR}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'matrix37' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.builder.gst
+          platforms: ${{ steps.prep.outputs.platforms }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.prep.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

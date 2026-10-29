@@ -10,8 +10,11 @@ CXX=arm-linux-gnueabihf-g++
 B2_VARIANT=armv7
 B2_TOOLSET_CXX=arm-linux-gnueabihf-g++
 B2_FLAGS="architecture=arm address-model=32"
+# Statically link libstdc++ and libgcc so the binary runs reliably across
+# various Linux distributions without GLIBCXX version mismatch errors.
+EXTRA_CGO_LDFLAGS="-static-libstdc++ -static-libgcc"
 
-export TARGET GOOS GOARCH GOARM CC CXX B2_VARIANT B2_TOOLSET_CXX B2_FLAGS
+export TARGET GOOS GOARCH GOARM CC CXX B2_VARIANT B2_TOOLSET_CXX B2_FLAGS EXTRA_CGO_LDFLAGS
 
 # shellcheck source=_deps.sh
 . "$(dirname "$0")/_deps.sh"
