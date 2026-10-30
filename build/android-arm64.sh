@@ -4,10 +4,10 @@
 # Prereqs: an unpacked NDK and ANDROID_NDK_HOME pointing at it.
 #   export ANDROID_NDK_HOME=/path/to/android-ndk-r29   # developer.android.com/ndk
 #
-# minSdk = 21 (Android 5.0), matching the original TorrServer Android target.
+# minSdk = 24 (Android 7.0), providing native getifaddrs() without restricted NETLINK_ROUTE sockets on Android 11+.
 
 : "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME to an unpacked Android NDK}"
-API=21
+API=24
 TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
 
 TARGET=android-arm64
@@ -17,7 +17,10 @@ CXX="$TC/bin/aarch64-linux-android${API}-clang++"
 B2_COMPILER=clang
 B2_VARIANT=android64
 B2_TOOLSET_CXX="$CXX"
-B2_FLAGS="target-os=android address-model=64 architecture=arm"
+# On Android 11+, NETLINK_ROUTE sockets are forbidden by SELinux, throwing
+# "session error: (13 Permission denied) bind: Permission denied".
+# Disable Netlink and use getifaddrs (available since API 24).
+B2_FLAGS="target-os=android address-model=64 architecture=arm define=TORRENT_USE_NETLINK=0 define=TORRENT_USE_IFADDRS=1"
 # github.com/wlynxg/anet reaches net.zoneCache via //go:linkname; Go 1.23+
 # rejects that by default. Its code only compiles on android, so the escape
 # hatch is only needed here.
@@ -26,6 +29,7 @@ EXTRA_GO_LDFLAGS="-checklinkname=0"
 # ships the bare binary — no libc++_shared alongside — so the executable dies
 # at load time ("cannot locate symbol ... __ndk1..."). Link libc++ statically.
 EXTRA_CGO_LDFLAGS="-static-libstdc++"
+EXTRA_CGO_CXXFLAGS="-DTORRENT_USE_NETLINK=0 -DTORRENT_USE_IFADDRS=1"
 # OpenSSL's android-* Configure targets need ANDROID_NDK_ROOT + the toolchain
 # on PATH; the API level define matches minSdk above.
 ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
@@ -35,7 +39,7 @@ OPENSSL_EXTRA_ARGS="-D__ANDROID_API__=${API}"
 CMAKE_CROSS_ARGS="-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-${API}"
 
 export TARGET GOOS GOARCH CC CXX B2_COMPILER B2_VARIANT B2_TOOLSET_CXX B2_FLAGS \
-       EXTRA_GO_LDFLAGS EXTRA_CGO_LDFLAGS \
+       EXTRA_GO_LDFLAGS EXTRA_CGO_LDFLAGS EXTRA_CGO_CXXFLAGS \
        ANDROID_NDK_ROOT OPENSSL_PATH OPENSSL_EXTRA_ARGS CMAKE_CROSS_ARGS
 
 # shellcheck source=_deps.sh
