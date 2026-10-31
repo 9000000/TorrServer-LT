@@ -439,9 +439,6 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		"auto_scrape_min_interval":          900,
 		"stop_tracker_timeout":              1,
 		"seed_choking_algorithm":            1, // fastest_upload: reciprocity favours fast peers
-		"choking_algorithm":                 2, // rate_based_choker: dynamically keeps fastest peers unchoked
-		"peer_turnover":                     0, // disable periodic random disconnect of fast peers
-		"peer_turnover_cutoff":              100,
 
 		// Don't let the queue manager pause our stream. Torrents are added
 		// auto_managed, and libtorrent's default active limits (≈3 downloads /

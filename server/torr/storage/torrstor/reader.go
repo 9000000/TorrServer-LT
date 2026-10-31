@@ -280,7 +280,7 @@ func NewReader(cache *Cache, handle *lt.Torrent, file FileInfo, group ...string)
 	// wants a fat buffer raises it. Still set here (not only on add) because a series switch
 	// or a post-gap reconnect can briefly empty the reader set, and unregisterReader drops
 	// the cap then; re-applying keeps the new episode from inheriting a stale lower value.
-	if handle != nil {
+	if handle != nil && !r.internal {
 		_ = handle.SetMaxConnections(configuredConnLimit())
 	}
 	// Deliberately DON'T scheduleWindow() here. A reader is born at offset 0 and

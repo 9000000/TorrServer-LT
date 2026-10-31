@@ -377,7 +377,11 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 			burst = preloadConnections
 		}
 		_ = lh.SetMaxConnections(burst)
-		defer func() { _ = lh.SetMaxConnections(configuredConns) }()
+		defer func() {
+			if cache.ActiveReaders() == 0 && !preloadOK {
+				_ = lh.SetMaxConnections(configuredConns)
+			}
+		}()
 	}
 
 	// For MP4 the exact moov range can be auto-detected and buffered precisely (its
@@ -523,6 +527,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		t.mu.Lock()
 		t.PreloadedBytes = got
 		t.mu.Unlock()
+		t.AddExpiredTime(torrentExpireTimeout())
 		if done == gateCount {
 			preloadOK = true
 			break
@@ -542,6 +547,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		// Guarded by head residency so the EOF-index-reader-first race still fills
 		// the head before yielding (never starts playback on an empty buffer).
 		if cache.StreamingReaders() > 0 && cache.Have(headLast) {
+			preloadOK = true
 			break
 		}
 		select {
@@ -557,6 +563,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		t.Stat = state.TorrentWorking
 	}
 	t.mu.Unlock()
+	t.AddExpiredTime(torrentExpireTimeout())
 
 	// Seamless handoff:
 	// Keep the swarm hot and actively download a readahead window PAST the head
@@ -613,6 +620,9 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 					}
 					for _, p := range wPieces {
 						_ = lh.SetPiecePriority(p, 0)
+					}
+					if cache.ActiveReaders() == 0 {
+						_ = lh.SetMaxConnections(configuredConns)
 					}
 					return
 				case <-t.closeCh:
