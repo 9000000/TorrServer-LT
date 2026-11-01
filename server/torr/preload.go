@@ -558,6 +558,15 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		break
 	}
 
+	// Seamless client handoff: If client disconnected/cancelled because it reached its ready threshold
+	// (e.g. >= 90% of total buffer and headFirst is resident, or a reader has connected),
+	// treat this preload as successfully handed off so we preserve the warm swarm and cache reserve.
+	if !preloadOK && cache.Have(headFirst) {
+		if (total > 0 && float64(got)/float64(total) >= 0.90) || cache.StreamingReaders() > 0 {
+			preloadOK = true
+		}
+	}
+
 	t.mu.Lock()
 	if t.Stat == state.TorrentPreload {
 		t.Stat = state.TorrentWorking
@@ -820,6 +829,39 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 				if rs != nil && rs.Reader >= headFirst && rs.Reader < tailFirst {
 					dbg("skip: file already playing, body reader at", rs.Reader)
 					return
+				}
+			}
+
+			// If an explicit &preload is actively running and headFirst is already resident,
+			// let the player stream directly without spawning a duplicate second preload.
+			torr.mu.Lock()
+			isPreloading := torr.Stat == state.TorrentPreload
+			torr.mu.Unlock()
+			if isPreloading && cache.Have(headFirst) {
+				dbg("skip: explicit preload in flight and headFirst resident, stream directly")
+				return
+			}
+			if isPreloading {
+				dbg("wait: explicit preload in flight, waiting for headFirst")
+				waitTick := time.NewTicker(100 * time.Millisecond)
+				defer waitTick.Stop()
+				for {
+					if cache.Have(headFirst) {
+						dbg("skip: headFirst became resident from explicit preload")
+						return
+					}
+					torr.mu.Lock()
+					stillPreloading := torr.Stat == state.TorrentPreload
+					torr.mu.Unlock()
+					if !stillPreloading {
+						return
+					}
+					select {
+					case <-reqCtx.Done():
+						return
+					case <-waitTick.C:
+						continue
+					}
 				}
 			}
 		}
