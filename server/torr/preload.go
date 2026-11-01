@@ -439,9 +439,10 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	probed := false
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
+	var got int64
 	for {
 		snap := cache.PiecesSnapshot()
-		var got int64
+		got = 0
 		done := 0
 		for _, p := range gatePieces {
 			st, ok := snap[p]
