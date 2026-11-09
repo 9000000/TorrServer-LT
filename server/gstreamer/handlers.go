@@ -40,18 +40,25 @@ func (s *Service) remove(c *gin.Context) {
 		return
 	}
 
-	dropTorrentForGStreamer(id)
+	// keep the torrent while another viewer still streams it
+	if hash := HashOfTaskID(id); !s.hasTasksForHash(hash) {
+		dropTorrentForGStreamer(hash)
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 func (s *Service) heartbeat(c *gin.Context) {
-	hash := c.Param("hash")
-	if s.Get(hash) == nil {
+	id := c.Param("hash")
+	task := s.Get(id)
+	if task == nil && !strings.Contains(id, sessionSeparator) {
+		task = s.GetAnyForHash(id) // clients that poll torrent stats use the bare torrent hash
+	}
+	if task == nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
 
-	c.JSON(http.StatusOK, torrentHeartbeatState(hash))
+	c.JSON(http.StatusOK, torrentHeartbeatState(HashOfTaskID(id)))
 }
 
 func (s *Service) probe(c *gin.Context) {
@@ -84,7 +91,7 @@ func (s *Service) master(c *gin.Context) {
 	// resolveAudioIndex. An explicit ?audio=N keeps winning as before.
 	audio := parseQueryInt(c, "audio", -1)
 
-	task, err := s.GetOrAdd(hash, fileID, audio)
+	task, err := s.GetOrAddSession(hash, c.Query("sid"), fileID, audio)
 	if err != nil {
 		gstSourceFailure(hash, fileID, audio, "master task creation", err)
 		abortWithSourceError(c, err)
@@ -100,6 +107,9 @@ func (s *Service) master(c *gin.Context) {
 		abortWithRequestError(c, http.StatusBadGateway, err)
 		return
 	}
+
+	// External subtitle files from the torrent (see subtitles_external.go).
+	task.ensureExternalSubtitles(c.Request.Context())
 
 	playlist := buildVariantPlaylist(task, audio, seconds)
 	c.Data(http.StatusOK, "application/vnd.apple.mpegurl; charset=utf-8", []byte(playlist))
@@ -129,10 +139,7 @@ func buildVariantPlaylist(task *Task, audio int, seconds int) string {
 			}
 			hasSubtitles = true
 			language := hlsQuoted(firstNonEmpty(track.Language, "und"))
-			name := track.Title
-			if name == "" {
-				name = "Subtitle " + strconv.Itoa(track.Index)
-			}
+			name := embeddedSubtitleName(track)
 			playlist.WriteString("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"")
 			playlist.WriteString(hlsQuoted(name))
 			playlist.WriteString("\",LANGUAGE=\"")
@@ -142,6 +149,10 @@ func buildVariantPlaylist(task *Task, audio int, seconds int) string {
 			playlist.WriteString("/subs/")
 			playlist.WriteString(strconv.Itoa(track.Index))
 			playlist.WriteString(".m3u8\"\n")
+		}
+		for _, ext := range task.externalSubtitles() {
+			hasSubtitles = true
+			writeSubtitleMedia(&playlist, taskID, ext.Name, firstNonEmpty(ext.Language, "und"), ext.Index)
 		}
 		if hasSubtitles {
 			playlist.WriteByte('\n')

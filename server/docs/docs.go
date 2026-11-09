@@ -1445,6 +1445,58 @@ const docTemplate = `{
                 }
             }
         },
+        "/subs/{hash}/{id}": {
+            "get": {
+                "description": "Without \"track\": list external subtitle tracks found in the torrent for the given video file.\nWith \"track\": return that subtitle file, by default converted to WebVTT.\n\"format\": \"vtt\" (default) or \"original\" (no conversion). \"encoding\": output charset, default utf8.",
+                "produces": [
+                    "application/json",
+                    "text/vtt"
+                ],
+                "tags": [
+                    "API"
+                ],
+                "summary": "External subtitles of a video file",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Torrent infohash",
+                        "name": "hash",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Video file index in torrent",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Subtitle file index (from the list)",
+                        "name": "track",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "vtt (default) or original",
+                        "name": "format",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Output encoding, default utf8 (also: windows-1251)",
+                        "name": "encoding",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "List of tracks (JSON) or WebVTT"
+                    }
+                }
+            }
+        },
         "/tmdb/settings": {
             "get": {
                 "description": "Get TMDB API configuration",
@@ -1613,7 +1665,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Torznab categories, comma-separated (default 5000,2000 = TV+Movies)",
+                        "description": "Torznab categories, comma-separated; omit to use each indexer's configured categories, pass empty to search all",
                         "name": "cat",
                         "in": "query"
                     },
@@ -2360,6 +2412,19 @@ const docTemplate = `{
                 }
             }
         },
+        "settings.CategoryType": {
+            "type": "string",
+            "enum": [
+                "default",
+                "manual",
+                "all"
+            ],
+            "x-enum-varnames": [
+                "CategoryDefault",
+                "CategoryManual",
+                "CategoryAll"
+            ]
+        },
         "settings.TMDBConfig": {
             "type": "object",
             "properties": {
@@ -2384,6 +2449,18 @@ const docTemplate = `{
         "settings.TorznabConfig": {
             "type": "object",
             "properties": {
+                "catType": {
+                    "description": "default (empty) | manual | all",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/settings.CategoryType"
+                        }
+                    ]
+                },
+                "categories": {
+                    "description": "comma-separated Torznab category ids, used when CatType is manual",
+                    "type": "string"
+                },
                 "host": {
                     "type": "string"
                 },

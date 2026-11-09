@@ -2,7 +2,7 @@
 
 > Fork of [YouROK/TorrServer](https://github.com/YouROK/TorrServer) with the BitTorrent core replaced by [libtorrent (arvidn)](https://www.libtorrent.org/).
 >
-> **Status:** feature parity with upstream **MatriX.146** (including GStreamer HLS transcoding, WAF and MCP) on the libtorrent engine — streaming, preload, and seeking (including back into already-evicted regions) are verified on real torrents. The HTTP API, on-disk databases (`config.db`, JSON, `accs.db`, viewed) and the `torrs://` token format remain compatible with upstream. The cache layout under `TorrentsSavePath/<hash>/<pieceID>` is preserved.
+> **Status:** feature parity with upstream **MatriX.150** (including GStreamer HLS transcoding, WAF and MCP) on the libtorrent engine — streaming, preload, and seeking (including back into already-evicted regions) are verified on real torrents. The HTTP API, on-disk databases (`config.db`, JSON, `accs.db`, viewed) and the `torrs://` token format remain compatible with upstream. The cache layout under `TorrentsSavePath/<hash>/<pieceID>` is preserved.
 >
 > **Platforms:**
 > - Linux: `amd64`, `arm64`, `armv7`
@@ -84,7 +84,7 @@ curl -s https://raw.githubusercontent.com/trinity-aml/TorrServer-LT/master/insta
 - Install a specific version:
 
   ```bash
-  sudo bash ./installTorrServerLinux.sh --install MatriX.146.LT-1.2.7 --silent
+  sudo bash ./installTorrServerLinux.sh --install MatriX.150.LT-1.2.8 --silent
   ```
 
 - Update to latest version:
@@ -326,7 +326,7 @@ in the [GStreamer](#gstreamer) section below.
 
 ## Development
 
-This fork links **libtorrent 2.1.0 (arvidn)** into the Go server through a CGo
+This fork links **libtorrent 2.1.2 (arvidn)** into the Go server through a CGo
 shim (`server/lt`). Unlike upstream's pure-Go engine, every build is therefore
 **CGo + C++** and needs a libtorrent/Boost toolchain. One shim feature — the
 per-piece `we_dont_have` the streaming cache uses to re-download evicted regions
@@ -402,7 +402,7 @@ WebTorrent (`wss://` trackers, browser peers). `cmake` is required on the build
 host for the WebRTC deps. Everything links statically — the only dynamic deps
 in the final binary are libc/libstdc++/libgcc (Windows links those static
 too). Versions are pinned in `build/_common.sh` (Boost 1.85.0, libtorrent
-v2.1.0, OpenSSL 3.5.7) and overridable, e.g.
+v2.1.2, OpenSSL 3.5.9) and overridable, e.g.
 `LIBTORRENT_TAG=v2.0.13 build/linux-arm64.sh`. Full detail and the per-target
 prerequisites table: [`build/README.md`](build/README.md).
 
@@ -680,6 +680,21 @@ location / {
 }
 ```
 
+## External subtitles
+
+TorrServer can find subtitle files that lie next to a video inside a torrent and serve them to clients, converted to WebVTT or in their original format. It works in all builds and needs no external tools.
+
+```
+GET /subs/{hash}/{id}                  list subtitle tracks for the video file {id}
+GET /subs/{hash}/{id}?track={index}    return one subtitle file (WebVTT by default)
+```
+
+Query parameters for `track`: `format` (`vtt` or `original`) and `encoding` (`utf8` or `windows-1251`).
+
+With a `-gst` build the tracks are also listed in the HLS master playlist, so the built-in player offers them without any extra request.
+
+See [server/subs/README.md](server/subs/README.md) for the supported formats and encodings, and for the file layouts inside a torrent that are recognized.
+
 ## Web Application Firewall (WAF)
 
 TorrServer includes an HTTP access WAF that filters clients by IP address and by the `Referer` and `Origin` request headers. Configure it from **Settings → WAF** or through the authenticated `/waf` API.
@@ -786,31 +801,38 @@ Configure it in the web UI: **Settings → Torznab**.
 
 Each Torznab indexer needs:
 
-- **Host URL**: full URL to the Torznab API endpoint.
-  - Jackett example:
+- **Host URL**: Torznab base URL. TorrServer always calls the `/api` endpoint and accepts the host with or without a trailing `/api` or `/api/` (it will not be doubled).
+  - Jackett example (either form works):
 
   ```shell
   http://192.168.1.10:9117/api/v2.0/indexers/all/results/torznab/
+  http://192.168.1.10:9117/api/v2.0/indexers/all/results/torznab/api
   ```
 
   - Prowlarr example:
-  
+
   ```shell
   http://localhost:9696/1
   ```
-  
-  - Make sure to include the correct trailing slash (`/`) in your indexer's URL,
-  as required by your Torznab provider. TorrServer will try to properly format the path,
-  but matching your indexer's expected format is best to avoid connection issues.
-  
+
+  - Other indexers often document the full endpoint with `/api` (e.g. `http://127.0.0.1:9117/torznab/api`). You can paste that as-is.
+
 - **API Key**: the key from your Torznab indexer manager.
+- **Categories** (PRO mode): which Torznab categories this indexer is searched with.
+  - **Default** — movies and TV (`5000,2000`). This is also what indexers added before the setting existed use.
+  - **Manual** — the comma-separated list you enter (e.g. `5000,2000,3000`); an empty list searches everything.
+  - **All** — no category is sent, the indexer decides.
+
+  A search request may still override this: `GET /torznab/search?cat=...` searches those
+  categories, `cat=` (empty) searches all of them, and omitting `cat` uses each indexer's
+  own setting (the Telegram bot and the MCP server always do the latter).
 
 ### Enabling Torznab search
 
 1. Open **Settings**.
 2. Open the **Torznab** tab.
 3. Turn on **Enable Torznab Search**.
-4. Enter **Host URL** and **API Key**, then **Add Server** for each indexer.
+4. Enter **Host URL** and **API Key** (and, in PRO mode, pick the **Categories**), then **Add Server** for each indexer.
 5. **Save** settings.
 
 ## GStreamer

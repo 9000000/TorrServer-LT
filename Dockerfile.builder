@@ -14,9 +14,9 @@
 
 # Global build arguments (can be overridden via Docker Compose `build.args`)
 ARG LT_TAG=v2.1.2
-ARG GO_VERSION=1.27.0
+ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.20
-ARG TS_VERSION=MatriX.146.LT-1.2.7
+ARG TS_VERSION=MatriX.150.LT-1.2.8
 ARG TS_PORT=8090
 
 ############################

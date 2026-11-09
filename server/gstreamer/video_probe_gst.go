@@ -3,6 +3,7 @@
 package gstreamer
 
 import (
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ const (
 	gstPadProbeOK     uintptr = 1
 	gstPadProbeRemove uintptr = 2
 
+	gstEventCaps       uint32 = 12814
 	gstEventFlushStart uint32 = 2563
 	gstEventSegment    uint32 = 17934
 )
@@ -107,9 +109,18 @@ type videoSegmentClipProbeState struct {
 	segmentStart   atomic.Uint64
 }
 
+type hevcHDRCapsProbeState struct {
+	api         *gstAPI
+	mu          sync.Mutex
+	initialCaps uintptr
+	closed      bool
+}
+
 var (
 	videoProbeStates    sync.Map
 	videoProbeNextToken atomic.Uint64
+
+	hevcHDRCapsProbeCallback = purego.NewCallback(hevcHDRCapsPadProbe)
 
 	videoStartProbeCallback = purego.NewCallback(videoStartPadProbe)
 	videoClipProbeCallback  = purego.NewCallback(videoSegmentClipPadProbe)
@@ -189,6 +200,19 @@ func (r *gstRunner) installVideoSegmentClipProbe(pipeline uintptr, requestedStar
 	}
 }
 
+func (r *gstRunner) installHEVCHDRCapsProbe(pipeline uintptr) error {
+	if !r.task.Probe.IsH265() || videoIsTranscoded(r.task.Config, r.task.Probe) {
+		return nil
+	}
+	pad := gstPipelineElementPad(gstRuntime, pipeline, "video_timestamper", "src")
+	state := &hevcHDRCapsProbeState{api: gstRuntime}
+	r.hevcHDRCapsProbe = addVideoPadProbe(gstRuntime, pad, gstPadProbeTypeEventDownstream, hevcHDRCapsProbeCallback, state)
+	if r.hevcHDRCapsProbe == nil {
+		return errors.New("HEVC HDR caps probe is not available")
+	}
+	return nil
+}
+
 func gstPipelineElementPad(api *gstAPI, pipeline uintptr, elementName string, padName string) uintptr {
 	if api == nil || api.gstBinGetByName == nil || api.gstElementGetStaticPad == nil || api.gstObjectUnref == nil {
 		return 0
@@ -249,6 +273,13 @@ func removeVideoPadProbe(target **gstPadProbeRegistration) {
 		registration.api.gstPadRemoveProbe(registration.pad, uintptr(id))
 	}
 	videoProbeStates.Delete(registration.token)
+	if state, ok := registration.state.(*hevcHDRCapsProbeState); ok {
+		state.mu.Lock()
+		state.closed = true
+		state.api.miniObjectUnref(state.initialCaps)
+		state.initialCaps = 0
+		state.mu.Unlock()
+	}
 	if registration.api != nil && registration.api.gstObjectUnref != nil {
 		registration.api.objectUnref(registration.pad)
 	}
@@ -366,11 +397,75 @@ func videoSegmentClipPadProbe(_ purego.CDecl, _ uintptr, info uintptr, userData 
 	return gstPadProbeOK
 }
 
+func hevcHDRCapsPadProbe(_ purego.CDecl, _ uintptr, info uintptr, userData uintptr) (result uintptr) {
+	result = gstPadProbeOK
+	defer func() {
+		if recover() != nil {
+			result = gstPadProbeOK
+		}
+	}()
+
+	value, ok := videoProbeStates.Load(userData)
+	if !ok {
+		return gstPadProbeRemove
+	}
+	state, ok := value.(*hevcHDRCapsProbeState)
+	if !ok {
+		return gstPadProbeRemove
+	}
+	if gstProbeInfoType(info)&gstPadProbeTypeEventDownstream == 0 {
+		return gstPadProbeOK
+	}
+	event := gstProbeInfoData(info)
+	if gstEventType(event) != gstEventCaps {
+		return gstPadProbeOK
+	}
+	// Removal can overlap a callback that already loaded the registry entry.
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed {
+		return gstPadProbeRemove
+	}
+	api := state.api
+	var caps uintptr
+	api.gstEventParseCaps(event, unsafe.Pointer(&caps))
+	if state.initialCaps == 0 {
+		state.initialCaps = api.gstMiniObjectCopy(caps)
+		return gstPadProbeOK
+	}
+	replacementCaps := api.gstMiniObjectCopy(caps)
+	defer api.miniObjectUnref(replacementCaps)
+	initial := api.gstCapsGetStructure(state.initialCaps, 0)
+	current := api.gstCapsGetStructure(replacementCaps, 0)
+	for _, field := range []string{"mastering-display-info", "content-light-level"} {
+		if value := api.gstStructureGetValue(initial, field); value != 0 {
+			api.gstStructureSetValue(current, field, value)
+		} else {
+			api.gstStructureRemoveField(current, field)
+		}
+	}
+	// Copy the incoming event to retain its sequence number, timestamp and flags.
+	// A temporary CAPS event provides the native boxed caps GValue for that copy.
+	capsEvent := api.gstEventNewCaps(replacementCaps)
+	defer api.miniObjectUnref(capsEvent)
+	replacement := api.gstMiniObjectCopy(event)
+	api.gstStructureSetValue(api.gstEventWritableStructure(replacement), "caps",
+		api.gstStructureGetValue(api.gstEventGetStructure(capsEvent), "caps"))
+	if runtime.GOOS == "windows" {
+		(*gstPadProbeInfoWindowsABI)(ptrFrom(info)).data = replacement
+	} else {
+		(*gstPadProbeInfoUnixABI)(ptrFrom(info)).data = replacement
+	}
+	// Probe info owns one reference: transfer the copy and release the old event.
+	api.miniObjectUnref(event)
+	return gstPadProbeOK
+}
+
 func gstProbeInfoType(info uintptr) uint32 {
 	if info == 0 {
 		return 0
 	}
-	return (*gstPadProbeInfoABI)(unsafe.Pointer(info)).probeType
+	return (*gstPadProbeInfoABI)(ptrFrom(info)).probeType
 }
 
 func gstProbeInfoData(info uintptr) uintptr {
@@ -378,23 +473,23 @@ func gstProbeInfoData(info uintptr) uintptr {
 		return 0
 	}
 	if runtime.GOOS == "windows" {
-		return (*gstPadProbeInfoWindowsABI)(unsafe.Pointer(info)).data
+		return (*gstPadProbeInfoWindowsABI)(ptrFrom(info)).data
 	}
-	return (*gstPadProbeInfoUnixABI)(unsafe.Pointer(info)).data
+	return (*gstPadProbeInfoUnixABI)(ptrFrom(info)).data
 }
 
 func gstEventType(event uintptr) uint32 {
 	if event == 0 {
 		return 0
 	}
-	return (*gstEventABI)(unsafe.Pointer(event)).eventType
+	return (*gstEventABI)(ptrFrom(event)).eventType
 }
 
 func gstBufferPTS(buffer uintptr) (uint64, bool) {
 	if buffer == 0 {
 		return 0, false
 	}
-	pts := (*gstBufferABI)(unsafe.Pointer(buffer)).pts
+	pts := (*gstBufferABI)(ptrFrom(buffer)).pts
 	return pts, pts != gstClockTimeNone
 }
 
@@ -402,7 +497,7 @@ func gstBufferClockTime(buffer uintptr) (uint64, bool) {
 	if buffer == 0 {
 		return 0, false
 	}
-	native := (*gstBufferABI)(unsafe.Pointer(buffer))
+	native := (*gstBufferABI)(ptrFrom(buffer))
 	if native.pts != gstClockTimeNone {
 		return native.pts, true
 	}
@@ -432,7 +527,7 @@ func gstTimeSegment(api *gstAPI, event uintptr) (start uint64, segmentTime uint6
 	if segmentPointer == 0 {
 		return gstClockTimeNone, gstClockTimeNone, false
 	}
-	segment := (*gstSegmentABI)(unsafe.Pointer(segmentPointer))
+	segment := (*gstSegmentABI)(ptrFrom(segmentPointer))
 	if segment.format != gstFormatTime {
 		return gstClockTimeNone, gstClockTimeNone, false
 	}
