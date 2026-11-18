@@ -6,9 +6,25 @@ import (
 	"strings"
 
 	"server/log"
+	"server/settings"
 
 	"github.com/gin-gonic/gin"
 )
+
+func isInternalLoopbackListener(r *http.Request) bool {
+	if r == nil || settings.InternalPort == "" {
+		return false
+	}
+	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || la == nil {
+		return false
+	}
+	host, port, err := net.SplitHostPort(la.String())
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" && port == settings.InternalPort
+}
 
 // WAF returns Gin middleware that enforces IP white/blacklist and referer denylist.
 // Lists are loaded at first use via Load() and can be hot-reloaded through the store.
@@ -17,6 +33,14 @@ func WAF() gin.HandlerFunc {
 	Load()
 
 	return func(c *gin.Context) {
+		// TorrServer's own loopback listener (127.0.0.1:<InternalPort>, used by
+		// ffprobe and GStreamer) is unspoofable via LocalAddrContextKey and must
+		// never be blocked by user-configured external IP whitelists.
+		if isInternalLoopbackListener(c.Request) {
+			c.Next()
+			return
+		}
+
 		snap := GetSnapshot()
 
 		// Built-in + configured referer denylist is checked before the IP ACL.

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/dms/dlna/dms"
@@ -21,7 +22,10 @@ import (
 	"server/web/pages/template"
 )
 
-var dmsServer *dms.Server
+var (
+	dmsMu     sync.Mutex
+	dmsServer *dms.Server
+)
 
 // ssdpNoiseFilter wraps the real log handlers and drops the benign SSDP
 // datagram-parse errors the dms multicast listener emits on every malformed
@@ -56,22 +60,38 @@ func isSSDPNoise(r log.Record) bool {
 }
 
 func Start() {
+	dmsMu.Lock()
+	if dmsServer != nil {
+		dmsMu.Unlock()
+		return
+	}
 	logger := log.Default.WithNames("dlna")
-	// The ssdp listener (a child of this dms logger) logs a benign EOF on every
-	// malformed multicast datagram. Wrap the dms logger's handlers with a filter
-	// that swallows just that noise; the ssdp child inherits these handlers via
-	// WithNames, so its EOF spam is dropped while real records pass through.
 	dmsLogger := logger.WithNames("dms", "server")
 	dmsLogger.SetHandlers(ssdpNoiseFilter{next: dmsLogger.Handlers})
-	dmsServer = &dms.Server{
+
+	port := 9080
+	for port < 9180 {
+		logger.Levelf(log.Info, "Check dlna port %d", port)
+		if err := netbind.CheckPort(settings.IPs, strconv.Itoa(port)); err == nil {
+			break
+		}
+		port++
+	}
+	logger.Levelf(log.Info, "Set dlna port %d", port)
+	httpConn, err := netbind.Listen(settings.IPs, strconv.Itoa(port))
+	if err != nil {
+		dmsMu.Unlock()
+		logger.Levelf(log.Error, "dlna listen failed (DLNA disabled): %v", err)
+		return
+	}
+
+	srv := &dms.Server{
 		Logger: dmsLogger,
 		Interfaces: func() (ifs []net.Interface) {
-			var err error
 			ifaces, err := anet.Interfaces()
 			if err != nil {
 				logger.Levelf(log.Error, "%v", err)
 				return
-				// os.Exit(1) // avoid start on Android 13+
 			}
 			for _, i := range ifaces {
 				// interface flags seem to always be 0 on Windows
@@ -82,23 +102,7 @@ func Start() {
 			}
 			return
 		}(),
-		HTTPConn: func() net.Listener {
-			port := 9080
-			for {
-				logger.Levelf(log.Info, "Check dlna port %d", port)
-				if err := netbind.CheckPort(settings.IPs, strconv.Itoa(port)); err == nil {
-					break
-				}
-				port++
-			}
-			logger.Levelf(log.Info, "Set dlna port %d", port)
-			conn, err := netbind.Listen(settings.IPs, strconv.Itoa(port))
-			if err != nil {
-				logger.Levelf(log.Error, "%v", err)
-				os.Exit(1)
-			}
-			return conn
-		}(),
+		HTTPConn:            httpConn,
 		FriendlyName:        getDefaultFriendlyName(),
 		NoTranscode:         true,
 		NoProbe:             true,
@@ -133,22 +137,29 @@ func Start() {
 		OnBrowseMetadata:       onBrowseMeta,
 	}
 
-	if err := dmsServer.Init(); err != nil {
-		logger.Levelf(log.Error, "error initing dms server: %v", err)
-		os.Exit(1)
+	if err := srv.Init(); err != nil {
+		_ = httpConn.Close()
+		dmsMu.Unlock()
+		logger.Levelf(log.Error, "error initing dms server (DLNA disabled): %v", err)
+		return
 	}
-	go func() {
-		if err := dmsServer.Run(); err != nil {
-			logger.Levelf(log.Error, "%v", err)
-			os.Exit(1)
+	dmsServer = srv
+	dmsMu.Unlock()
+
+	go func(s *dms.Server) {
+		if err := s.Run(); err != nil {
+			logger.Levelf(log.Error, "dms server stopped: %v", err)
 		}
-	}()
+	}(srv)
 }
 
 func Stop() {
-	if dmsServer != nil {
-		dmsServer.Close()
-		dmsServer = nil
+	dmsMu.Lock()
+	srv := dmsServer
+	dmsServer = nil
+	dmsMu.Unlock()
+	if srv != nil {
+		srv.Close()
 	}
 }
 

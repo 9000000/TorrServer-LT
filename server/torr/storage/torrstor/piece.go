@@ -178,9 +178,22 @@ func (p *Piece) ReadAt(b []byte, off int64) (int, error) {
 }
 
 // expectedSize accounts for the final piece being potentially shorter
-// than PieceLength.
+// than PieceLength when TotalSize is known on the parent Cache.
 func (p *Piece) expectedSize() int64 {
-	return p.cache.PieceLength
+	return p.cache.expectedPieceSize(p.Id)
+}
+
+// memCost is what this piece costs the eviction budget. In RAM mode that is
+// the allocated slice capacity (a whole piece from the first written block),
+// not the logical bytes received so far (upstream #955). Disk pieces cost
+// their on-disk file size.
+func (p *Piece) memCost() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.mem != nil {
+		return p.mem.Allocated()
+	}
+	return p.size
 }
 
 // release frees the in-memory buffer only. The on-disk file (if any)
@@ -228,6 +241,29 @@ func (p *Piece) setComplete(v bool) {
 	p.mu.Lock()
 	p.complete = v
 	p.mu.Unlock()
+}
+
+// markVerifiedComplete marks the piece complete on piece_finished_alert only
+// if the backing data was not evicted and partially re-created in the meantime
+// (prevents a stale alert from exposing unwritten zero holes as verified data).
+func (p *Piece) markVerifiedComplete() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.size <= 0 {
+		return
+	}
+	if p.mem != nil {
+		if p.mem.buf == nil || p.avail == nil {
+			return
+		}
+		fullBlocks := int(p.size / pieceBlockSize)
+		for b := 0; b < fullBlocks; b++ {
+			if p.avail[b>>6]&(1<<uint(b&63)) == 0 {
+				return
+			}
+		}
+	}
+	p.complete = true
 }
 
 func (p *Piece) Accessed() int64 {

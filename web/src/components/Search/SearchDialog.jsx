@@ -288,7 +288,7 @@ export default function SearchDialog({ handleClose }) {
                 const formattedSize = formatSizeToClassicUnits(sizeBytes)
                 return (
                   <div key={item.Hash || item.Link || index}>
-                    <ListItem button onClick={() => handleAdd(item)}>
+                    <ListItem button disabled={adding} onClick={() => handleAdd(item)}>
                       <ListItemText
                         primary={item.Title}
                         secondary={

@@ -86,7 +86,7 @@ func (bt *BTServer) Connect() error {
 
 	bt.stopAlert = make(chan struct{})
 	bt.alertDone = make(chan struct{})
-	go bt.alertPump(bt.stopAlert, bt.alertDone)
+	go bt.alertPump(s, bt.stopAlert, bt.alertDone)
 	go bt.expireWatch(bt.stopAlert)
 	go bt.upnpWatch(bt.stopAlert)
 
@@ -219,24 +219,31 @@ func (bt *BTServer) dropInstance(t *Torrent) {
 
 // alertPump pulls alerts from libtorrent and dispatches them to per-
 // torrent notification channels. One goroutine per BTServer.
-func (bt *BTServer) alertPump(stop <-chan struct{}, done chan<- struct{}) {
+func (bt *BTServer) alertPump(sess *lt.Session, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
+	if sess == nil {
+		return
+	}
 	for {
 		select {
 		case <-stop:
 			return
 		default:
 		}
-		ok, err := bt.session.WaitAlert(500 * time.Millisecond)
+		ok, err := sess.WaitAlert(500 * time.Millisecond)
 		if err != nil {
 			log.Println("torr.alertPump: WaitAlert:", err)
-			time.Sleep(time.Second)
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Second):
+			}
 			continue
 		}
 		if !ok {
 			continue
 		}
-		alerts, err := bt.session.PopAlerts()
+		alerts, err := sess.PopAlerts()
 		if err != nil {
 			log.Println("torr.alertPump: PopAlerts:", err)
 			continue
@@ -287,7 +294,7 @@ func (bt *BTServer) upnpWatch(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-tick.C:
-			bt.RefreshUPnP()
+			bt.refreshUPnP(stop)
 		}
 	}
 }
@@ -295,7 +302,16 @@ func (bt *BTServer) upnpWatch(stop <-chan struct{}) {
 // RefreshUPnP re-triggers UPnP / NAT-PMP port mapping on the router without
 // restarting the session or dropping active torrent streams.
 func (bt *BTServer) RefreshUPnP() {
+	bt.refreshUPnP(nil)
+}
+
+func (bt *BTServer) refreshUPnP(stop <-chan struct{}) {
 	if settings.BTsets() != nil && settings.BTsets().DisableUPNP {
+		return
+	}
+	// Never tear down router port mappings while a viewer is actively streaming:
+	// libtorrent already renews leases automatically via upnp_lease_duration=7200.
+	if GetActiveStreams() > 0 {
 		return
 	}
 	sess := bt.Session()
@@ -309,7 +325,19 @@ func (bt *BTServer) RefreshUPnP() {
 		"enable_upnp":   false,
 		"enable_natpmp": false,
 	})
-	time.Sleep(300 * time.Millisecond)
+	if stop != nil {
+		select {
+		case <-stop:
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
+	} else {
+		time.Sleep(300 * time.Millisecond)
+	}
+	sess = bt.Session()
+	if sess == nil {
+		return
+	}
 	_ = sess.ApplySettings(lt.SessionConfig{
 		"enable_upnp":   true,
 		"enable_natpmp": true,

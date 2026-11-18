@@ -19,7 +19,7 @@ extern int  tsl_storage_have_go   (long long storage_id, int piece);
 /* Public installer: registers the Go callback set with the C++ side.
  * Called by lt.RegisterStorageCallbacks() on the Go side. */
 int tsl_install_go_storage_callbacks(void) {
-    static struct tsl_storage_callbacks cb;
+    struct tsl_storage_callbacks cb;
     cb.open    = (void (*)(int64_t, const uint8_t*, int, int64_t))         tsl_storage_open_go;
     cb.close   = (void (*)(int64_t))                                       tsl_storage_close_go;
     cb.deleted = (void (*)(int64_t))                                       tsl_storage_deleted_go;

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/md5"
 	"fmt"
 	"io/fs"
 	"log"
@@ -79,7 +80,15 @@ func main() {
 	files := make([]string, 0)
 
 	filepath.WalkDir(srcGo+"template/pages/", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if !d.IsDir() {
+			if strings.HasSuffix(strings.ToLower(d.Name()), ".map") {
+				// Source maps add ~6.5 MB of dead weight to the embedded Go binary and RSS.
+				_ = os.Remove(path)
+				return nil
+			}
 			name := strings.TrimPrefix(path, srcGo+"template/")
 			if strings.Contains(name, "\\") {
 				// Adding the ability to run on Windows with standard Go commands
@@ -93,7 +102,7 @@ func main() {
 	})
 	sort.Strings(files)
 	fmap := writeEmbed(srcGo+"template/html.go", files)
-	writeRoute(srcGo+"template/route.go", fmap)
+	writeRoute(srcGo+"template/route.go", srcGo+"template/pages", fmap)
 }
 
 func writeEmbed(fname string, files []string) map[string]string {
@@ -121,7 +130,7 @@ import (
 	return ret
 }
 
-func writeRoute(fname string, fmap map[string]string) {
+func writeRoute(fname, pagesDir string, fmap map[string]string) {
 	ff, err := os.Create(fname)
 	if err != nil {
 		fmt.Println(err)
@@ -131,19 +140,16 @@ func writeRoute(fname string, fmap map[string]string) {
 	embedStr := `package template
 
 import (
-	"crypto/md5"
-	"fmt"
 	"github.com/gin-gonic/gin"
 )
 
 func RouteWebPages(route gin.IRouter) {
 	route.GET("/", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(Indexhtml))
-		c.Header("Cache-Control", "no-cache")
-		c.Header("ETag", etag)
-		c.Data(200, "text/html; charset=utf-8", Indexhtml)
+		serve(c, Indexhtml, ` + etagOf(pagesDir+"/index.html") + `, "text/html; charset=utf-8", false)
 	})
 `
+	// Pin .js so the output does not depend on the Go version or the system MIME table
+	mime.AddExtensionType(".js", "application/javascript")
 	mime.AddExtensionType(".map", "application/json")
 	mime.AddExtensionType(".webmanifest", "application/manifest+json")
 	// sort fmap
@@ -160,22 +166,11 @@ func RouteWebPages(route gin.IRouter) {
 		if fmime == "image/x-icon" {
 			fmime = "image/vnd.microsoft.icon"
 		}
-		// Hashed assets (chunks, images) are immutable — their filename changes
-		// when their content does — so cache them for a year. The HTML entry
-		// point is NOT hashed and references the current chunk names; it must be
-		// revalidated, otherwise a browser keeps a stale index.html after a
-		// bundle update and requests the now-deleted old chunks (a white screen
-		// / "the app stopped working"). no-cache still uses the ETag for 304s.
-		cacheHdr := "public, max-age=31536000"
-		if strings.HasSuffix(link, ".html") {
-			cacheHdr = "no-cache"
-		}
+		// Only the build output under static/ has content hashes in its file names
+		immutable := strings.HasPrefix(link, "/static/")
 		embedStr += `
 	route.GET("` + link + `", func(c *gin.Context) {
-		etag := fmt.Sprintf("%x", md5.Sum(` + fmap[link] + `))
-		c.Header("Cache-Control", "` + cacheHdr + `")
-		c.Header("ETag", etag)
-		c.Data(200, "` + fmime + `", ` + fmap[link] + `)
+		serve(c, ` + fmap[link] + `, ` + etagOf(pagesDir+link) + `, "` + fmime + `", ` + fmt.Sprint(immutable) + `)
 	})
 `
 	}
@@ -184,8 +179,18 @@ func RouteWebPages(route gin.IRouter) {
 	ff.WriteString(embedStr)
 }
 
+// etagOf returns a quoted strong ETag for a file, as a Go string literal
+func etagOf(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Default().Fatalln(err.Error())
+	}
+	return fmt.Sprintf("`\"%x\"`", md5.Sum(data))
+}
+
 func run(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "GENERATE_SOURCEMAP=false", "NODE_OPTIONS=--openssl-legacy-provider")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	return cmd.Run()

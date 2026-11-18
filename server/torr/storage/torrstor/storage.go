@@ -89,7 +89,9 @@ func (s *Storage) callbackClose(storage int64) {
 	s.mu.Lock()
 	c := s.caches[storage]
 	if c != nil {
-		delete(s.byHash, c.InfoHash)
+		if s.byHash[c.InfoHash] == c {
+			delete(s.byHash, c.InfoHash)
+		}
 		delete(s.caches, storage)
 	}
 	s.mu.Unlock()

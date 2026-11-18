@@ -74,4 +74,9 @@ export const gstreamerMasterUrl = (hash, fileID, audio = 0) => {
 export const gstreamerProbeUrl = (hash, fileID) =>
   `${getTorrServerHost()}/gst/${encodeURIComponent(hash)}/probe?index=${encodeURIComponent(fileID)}`
 
-export const gstreamerHeartbeatUrl = hash => `${getTorrServerHost()}/gst/${encodeURIComponent(hash)}/heartbeat`
+export const gstreamerHeartbeatUrl = hash => {
+  const sid = gstreamerSessionId()
+  return `${getTorrServerHost()}/gst/${encodeURIComponent(hash)}/heartbeat${
+    sid ? `?sid=${encodeURIComponent(sid)}` : ''
+  }`
+}

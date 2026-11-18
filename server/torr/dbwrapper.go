@@ -2,6 +2,7 @@ package torr
 
 import (
 	"encoding/json"
+	"strings"
 
 	"server/settings"
 	"server/torr/state"
@@ -36,23 +37,43 @@ func fileStatsFromData(data string) []*state.TorrentFileStat {
 
 // AddTorrentDB serialises a torrent record into the persistent DB.
 func AddTorrentDB(torr *Torrent) {
+	if torr == nil {
+		return
+	}
+	torr.mu.Lock()
+	var specCopy *TorrentSpec
+	if torr.TorrentSpec != nil {
+		specCopy = torr.TorrentSpec.Clone()
+	}
+	title := torr.Title
+	category := torr.Category
+	data := torr.Data
+	poster := torr.Poster
+	size := torr.Size
+	timestamp := torr.Timestamp
+	torr.mu.Unlock()
+
 	t := new(settings.TorrentDB)
-	t.TorrentSpec = settingsSpec(torr.TorrentSpec)
-	t.Title = torr.Title
-	t.Category = torr.Category
-	if torr.Data == "" {
+	t.TorrentSpec = settingsSpec(specCopy)
+	t.Title = title
+	t.Category = category
+	if data == "" {
 		var f tsFiles
 		f.TorrServer.Files = torr.Status().FileStats
 		if buf, err := json.Marshal(&f); err == nil {
 			t.Data = string(buf)
-			torr.Data = t.Data
+			torr.mu.Lock()
+			if torr.Data == "" {
+				torr.Data = t.Data
+			}
+			torr.mu.Unlock()
 		}
 	} else {
-		t.Data = torr.Data
+		t.Data = data
 	}
 	// Keep the stored poster when the new one cannot be verified: a host that
 	// answers slowly (or at all only sometimes) must not wipe a working poster.
-	t.Poster = torr.Poster
+	t.Poster = poster
 	if t.Poster != "" {
 		var existing string
 		if db := GetTorrentDB(torr.Hash()); db != nil {
@@ -65,29 +86,35 @@ func AddTorrentDB(torr *Torrent) {
 			}
 		}
 	}
-	t.Size = torr.Size
+	t.Size = size
 	if t.Size == 0 {
 		t.Size = torr.Length()
 	}
-	t.Timestamp = torr.Timestamp
+	t.Timestamp = timestamp
 	settings.AddTorrent(t)
 }
 
-// GetTorrentDB looks up a single torrent record by info hash.
+// GetTorrentDB looks up a single torrent record by info hash using direct O(1)
+// key lookup rather than scanning and unmarshalling the entire bucket.
 func GetTorrentDB(hash Hash) *Torrent {
-	for _, db := range settings.ListTorrent() {
-		if db.TorrentSpec == nil {
-			continue
-		}
-		if NewHashFromHex(db.TorrentSpec.InfoHash) == hash {
-			return torrentFromDB(db)
-		}
+	if hash.IsZero() {
+		return nil
+	}
+	hexLower := hash.HexString()
+	if db := settings.GetTorrent(hexLower); db != nil {
+		return torrentFromDB(db)
+	}
+	if db := settings.GetTorrent(strings.ToUpper(hexLower)); db != nil {
+		return torrentFromDB(db)
 	}
 	return nil
 }
 
 // RemTorrentDB removes a torrent record by info hash.
 func RemTorrentDB(hash Hash) {
+	if hash.IsZero() {
+		return
+	}
 	settings.RemTorrent(hash.HexString())
 }
 
@@ -98,7 +125,10 @@ func ListTorrentsDB() map[Hash]*Torrent {
 		if db.TorrentSpec == nil {
 			continue
 		}
-		h := NewHashFromHex(db.TorrentSpec.InfoHash)
+		h, ok := ParseHash(db.TorrentSpec.InfoHash)
+		if !ok {
+			continue
+		}
 		out[h] = torrentFromDB(db)
 	}
 	return out

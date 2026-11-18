@@ -111,13 +111,25 @@ func ParseReader(r io.Reader) (*TorrentSpec, error) {
 	return ParseBytes(buf)
 }
 
-// ParseTorrentFilePath reads a .torrent file from disk.
+// ParseTorrentFilePath reads a .torrent file from disk, refusing special
+// files (FIFOs/devices) and capping payload reads at httpMaxBodyBytes (64 MiB).
 func ParseTorrentFilePath(path string) (*TorrentSpec, error) {
-	buf, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("torr.ParseTorrentFilePath: %w", err)
 	}
-	return ParseBytes(buf)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("torr.ParseTorrentFilePath: %w", err)
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("torr.ParseTorrentFilePath: not a regular file: %q", path)
+	}
+	if st.Size() > httpMaxBodyBytes {
+		return nil, fmt.Errorf("torr.ParseTorrentFilePath: file too large (%d bytes, max %d)", st.Size(), httpMaxBodyBytes)
+	}
+	return ParseReader(f)
 }
 
 // ParseTorrsHash decodes a torrs:// token (or bare base62 form) and

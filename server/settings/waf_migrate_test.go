@@ -138,6 +138,9 @@ func TestMigrateWAFListsReadOnly(t *testing.T) {
 }
 
 func TestMigrateWAFListsWriteFailureKeepsFiles(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0555 directory write permission checks")
+	}
 	withWAFSettingsPath(t)
 	wip := filepath.Join(Path, legacyWIPFile)
 	if err := os.WriteFile(wip, []byte("127.0.0.1\n"), 0o600); err != nil {

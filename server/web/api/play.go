@@ -37,6 +37,14 @@ func play(c *gin.Context) {
 		return
 	}
 
+	if notAuth {
+		if err := utils.TestLink(hash, false); err != nil {
+			c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+	}
+
 	spec, err := utils.ParseLink(hash)
 	if err != nil {
 		abortWithJSONError(c, http.StatusInternalServerError, err)
@@ -77,13 +85,13 @@ func play(c *gin.Context) {
 		return
 	}
 
-	// find file
+	// Explicit positive file index always wins; fall back to movie/single-file
+	// default only when indexStr is non-numeric or non-positive.
 	index := -1
-	catLower := strings.ToLower(tor.Category)
-	if strings.Contains(catLower, "movie") {
-		index = 1
-	} else if ind, err := strconv.Atoi(indexStr); err == nil {
+	if ind, err := strconv.Atoi(indexStr); err == nil && ind > 0 {
 		index = ind
+	} else if strings.Contains(strings.ToLower(tor.Category), "movie") {
+		index = 1
 	} else if len(tor.Files()) == 1 {
 		if st := tor.Status(); len(st.FileStats) == 1 {
 			index = st.FileStats[0].Id

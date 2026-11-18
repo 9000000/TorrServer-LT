@@ -414,7 +414,7 @@ func updateTorrent(ctx context.Context, req *mcpsdk.CallToolRequest, in updateTo
 	if in.Category != nil {
 		category = *in.Category
 	}
-	tor = torr.SetTorrent(in.Hash, title, poster, category, "")
+	tor = torr.SetTorrent(in.Hash, title, poster, category, st.Data)
 	if tor == nil {
 		return nil, getTorrentOut{}, fmt.Errorf("torrent not found")
 	}

@@ -151,7 +151,14 @@ export default function App() {
                   sortCategory={globalCategoryFilter}
                 />
 
-                <PWAFooter isOffline={isOffline} isLoading={isLoading} />
+                <PWAFooter
+                  isOffline={isOffline}
+                  isLoading={isLoading}
+                  onBackToList={() => {
+                    setGlobalFilterCategory('all')
+                    setIsDrawerOpen(false)
+                  }}
+                />
 
                 {isSearchDialogOpen && <SearchDialog handleClose={() => setIsSearchDialogOpen(false)} />}
 

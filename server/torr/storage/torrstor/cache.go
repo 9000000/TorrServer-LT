@@ -2,7 +2,10 @@ package torrstor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,8 +76,12 @@ type Cache struct {
 	InfoHash    [20]byte
 	NumPieces   int
 	PieceLength int64
+	totalSize   atomic.Int64
+
+	diskDirReady atomic.Bool
 
 	mu     sync.RWMutex
+	closed bool
 	pieces map[int]*Piece
 
 	// abandoned records pieces proactively forgotten on a seek (un-had via
@@ -171,8 +178,9 @@ type Cache struct {
 	// trigger that arrived while a pass held the guard, so the running worker re-runs and
 	// trims the blocks that landed mid-pass — otherwise filled could drift above cap
 	// between passes instead of being driven back down to the budget.
-	evicting   atomic.Bool
-	evictAgain atomic.Bool
+	evictSyncMu sync.Mutex
+	evicting    atomic.Bool
+	evictAgain  atomic.Bool
 }
 
 // group is the sliding-window state of one playback session (device). playhead
@@ -339,6 +347,80 @@ func (c *Cache) recentWaitFocus(group string) (waitFocusEntry, bool) {
 	return f, true
 }
 
+func (c *Cache) isClosed() bool {
+	c.mu.RLock()
+	cl := c.closed
+	c.mu.RUnlock()
+	return cl
+}
+
+// SetTotalSize records the exact byte size of the torrent once known, allowing
+// the final (short) piece to report its true expected length in UseDisk mode.
+func (c *Cache) SetTotalSize(total int64) {
+	if total <= 0 {
+		return
+	}
+	c.totalSize.Store(total)
+	if c.NumPieces <= 0 {
+		return
+	}
+	lastID := c.NumPieces - 1
+	exp := c.expectedPieceSize(lastID)
+	if exp <= 0 {
+		return
+	}
+	c.mu.RLock()
+	p := c.pieces[lastID]
+	c.mu.RUnlock()
+	if p != nil {
+		p.mu.Lock()
+		if p.disk != nil && p.size >= exp {
+			p.complete = true
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (c *Cache) expectedPieceSize(id int) int64 {
+	if c.PieceLength <= 0 {
+		return 0
+	}
+	if id == c.NumPieces-1 {
+		if total := c.totalSize.Load(); total > 0 {
+			rem := total - int64(c.NumPieces-1)*c.PieceLength
+			if rem > 0 && rem < c.PieceLength {
+				return rem
+			}
+		}
+	}
+	return c.PieceLength
+}
+
+// TrackDeadline registers an imperative piece deadline (from Preload or LocateMoov)
+// in the declarative tracking set so applyStreamPriorities clears it once unneeded.
+func (c *Cache) TrackDeadline(piece int) {
+	c.priMu.Lock()
+	c.deadlined[piece] = true
+	c.priMu.Unlock()
+}
+
+// InvalidatePriorities forces the next applyStreamPriorities call to push the full
+// priority vector to libtorrent even if the computed vector matches lastPrios
+// (used after Preload or LocateMoov mutates piece priorities directly).
+func (c *Cache) InvalidatePriorities() {
+	c.priMu.Lock()
+	c.lastPrios = nil
+	c.priMu.Unlock()
+}
+
+// ForceApplyStreamPriorities immediately reconciles declarative piece priorities
+// and deadlines (bypassing the 250ms debounce and invalidating lastPrios).
+func (c *Cache) ForceApplyStreamPriorities() {
+	c.InvalidatePriorities()
+	c.lastApplyMs.Store(0)
+	c.applyStreamPriorities()
+}
+
 // SignalPieceComplete is invoked from BTServer's alert pump when
 // libtorrent reports `piece_finished_alert` for this torrent. Wakes
 // any Reader blocked on the piece and marks the in-memory state
@@ -348,7 +430,7 @@ func (c *Cache) SignalPieceComplete(piece int) {
 	p := c.pieces[piece]
 	c.mu.RUnlock()
 	if p != nil {
-		p.setComplete(true)
+		p.markVerifiedComplete()
 	}
 	c.signalPieceProgress(piece)
 }
@@ -362,6 +444,15 @@ func (c *Cache) signalPieceProgress(piece int) {
 	if ch, ok := c.waiters[piece]; ok {
 		close(ch)
 		delete(c.waiters, piece)
+	}
+	c.waitMu.Unlock()
+}
+
+func (c *Cache) wakeAllWaiters() {
+	c.waitMu.Lock()
+	for id, ch := range c.waiters {
+		close(ch)
+		delete(c.waiters, id)
 	}
 	c.waitMu.Unlock()
 }
@@ -388,11 +479,16 @@ func (c *Cache) WaitForPiece(ctx context.Context, piece int) bool {
 		if c.Have(piece) {
 			return true
 		}
+		if c.isClosed() {
+			return false
+		}
 		ch := c.subscribePiece(piece)
-		// Recheck after subscribing — Have may have flipped while we were
-		// taking the lock.
+		// Recheck after subscribing — Have/closed may have flipped while locking.
 		if c.Have(piece) {
 			return true
+		}
+		if c.isClosed() {
+			return false
 		}
 		select {
 		case <-ch:
@@ -408,16 +504,37 @@ func (c *Cache) WaitForPiece(ctx context.Context, piece int) bool {
 // its first blocks arrive over the wire instead of after the whole piece
 // downloads and hashes.
 func (c *Cache) WaitForBytes(ctx context.Context, piece int, off int64) bool {
+	return c.waitForBytes(ctx, piece, off, nil)
+}
+
+// waitForBytes reconciles priorities periodically while a Reader is parked holding
+// r.mu (so its own reprioritizeLoop cannot run), recovering cleanly if a late
+// hash result or eviction leaves a missing piece un-requested.
+func (c *Cache) waitForBytes(ctx context.Context, piece int, off int64, reconcile func()) bool {
+	var ticks <-chan time.Time
+	if reconcile != nil {
+		timer := time.NewTicker(2 * time.Second)
+		defer timer.Stop()
+		ticks = timer.C
+	}
 	for {
 		if c.readableAt(piece, off) > 0 {
 			return true
 		}
+		if c.isClosed() {
+			return false
+		}
 		ch := c.subscribePiece(piece)
-		if c.readableAt(piece, off) > 0 { // recheck after subscribing (same race as above)
+		if c.readableAt(piece, off) > 0 {
 			return true
+		}
+		if c.isClosed() {
+			return false
 		}
 		select {
 		case <-ch:
+		case <-ticks:
+			reconcile()
 		case <-ctx.Done():
 			return false
 		}
@@ -517,6 +634,9 @@ func (c *Cache) groupReaderSnaps() map[string][]readerSnap {
 	defer c.readersMu.Unlock()
 	out := make(map[string][]readerSnap, len(c.readers))
 	for r := range c.readers {
+		if r.internal {
+			continue
+		}
 		cur := r.currentPiece()
 		s := readerSnap{group: r.group, cur: cur, ffirst: 0, flast: c.NumPieces - 1, bornMs: r.bornMs}
 		if plen > 0 {
@@ -535,8 +655,10 @@ func (c *Cache) groupReaderSnaps() map[string][]readerSnap {
 			s.stale = true
 		}
 		// Offset-0 probe (ServeContent's Seek(0,End)/Seek(0,Start) before the real
-		// seek): counting it would peg the anchor at the file head forever.
-		if r.winFirst.Load() < 0 && cur == 0 {
+		// seek): counting it would peg the anchor at the file head forever. Check
+		// file-local offset == 0 (not cur == 0) so episodes 2..N in multi-file
+		// torrents are classified properly too.
+		if r.winFirst.Load() < 0 && r.offset.Load() == 0 {
 			s.isProbe = true
 		}
 		// EOF index re-read (AVI idx1 / MKV cues / MP4 moov): players open a SECOND
@@ -926,9 +1048,14 @@ func (c *Cache) applyStreamPriorities() {
 
 	c.readersMu.Lock()
 	rs := make([]*Reader, 0, len(c.readers))
+	var auxBlocked []int
 	for r := range c.readers {
 		if !r.internal {
 			rs = append(rs, r)
+		} else if r.group == AuxReaderGroup {
+			if wp := int(r.waitPiece.Load()); wp >= 0 && !c.Have(wp) {
+				auxBlocked = append(auxBlocked, wp)
+			}
 		}
 	}
 	c.readersMu.Unlock()
@@ -1099,6 +1226,16 @@ func (c *Cache) applyStreamPriorities() {
 			}
 			if !c.Have(i) && h.HasPiece(i) {
 				refetch[i] = struct{}{}
+			}
+		}
+	}
+
+	for _, wp := range auxBlocked {
+		if wp >= 0 && wp < c.NumPieces {
+			raise(wp, ltTopPriority)
+			desired[wp] = 0
+			if !c.Have(wp) && h.HasPiece(wp) {
+				refetch[wp] = struct{}{}
 			}
 		}
 	}
@@ -1389,17 +1526,17 @@ const maxTailPinPieces = 6
 // close drops the in-memory state for every piece but leaves on-disk
 // files in place — they're the source of truth for the next resume.
 func (c *Cache) close() {
-	// Drop any leftover preload reservation (e.g. a preview that never streamed)
-	// so a dropped torrent doesn't carry a stale reserve into its next resume.
 	c.preloadMu.Lock()
 	c.preloadProtect = nil
 	c.preloadMu.Unlock()
 	c.mu.Lock()
+	c.closed = true
 	for _, p := range c.pieces {
 		p.release()
 	}
-	c.pieces = nil
+	c.pieces = map[int]*Piece{}
 	c.mu.Unlock()
+	c.wakeAllWaiters()
 }
 
 // wipe removes every piece's in-memory buffer AND the corresponding
@@ -1415,23 +1552,42 @@ func (c *Cache) wipe() {
 }
 
 // scanLocalPieces materialises Piece entries for any piece file already
-// present on disk (UseDisk mode). After this Have() / Reader will see
-// resume-restored pieces without going through readPiece's lazy
-// reconstruction. No-op when UseDisk is off.
+// present on disk (UseDisk mode) using a single ReadDir instead of thousands
+// of individual Stat syscalls on libtorrent's network thread.
 func (c *Cache) scanLocalPieces() {
 	if !useDisk() {
 		return
 	}
+	sp := savePath()
+	dir := filepath.Join(sp, hashHex(c.InfoHash))
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	c.diskDirReady.Store(true)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i := 0; i < c.NumPieces; i++ {
+	if c.closed {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		i, convErr := strconv.Atoi(entry.Name())
+		if convErr != nil || i < 0 || i >= c.NumPieces {
+			continue
+		}
 		if _, ok := c.pieces[i]; ok {
 			continue
 		}
-		candidate := newPiece(c, i)
-		if candidate.SizeBytes() > 0 {
-			c.pieces[i] = candidate
+		fi, infoErr := entry.Info()
+		if infoErr != nil || fi.Size() <= 0 {
+			continue
 		}
+		p := &Piece{cache: c, Id: i}
+		p.disk = newDiskPieceFromStat(p, sp, fi.Size(), fi.ModTime().Unix())
+		c.pieces[i] = p
 	}
 }
 
@@ -1440,13 +1596,21 @@ func (c *Cache) scanLocalPieces() {
 // this is the resume read-path for pieces our scan flagged as "have".
 func (c *Cache) readPiece(piece int, offset int64, dst []byte) (int, error) {
 	c.mu.RLock()
+	cl := c.closed
 	p := c.pieces[piece]
 	c.mu.RUnlock()
+	if cl {
+		return 0, errStorageMissing
+	}
 	if p == nil {
 		if !useDisk() {
 			return 0, errOutOfPiece
 		}
 		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return 0, errStorageMissing
+		}
 		if p = c.pieces[piece]; p == nil {
 			candidate := newPiece(c, piece)
 			if candidate.SizeBytes() > 0 {
@@ -1469,6 +1633,10 @@ func (c *Cache) writePiece(piece int, offset int64, src []byte) (int, error) {
 		return 0, errOutOfPiece
 	}
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return 0, errStorageMissing
+	}
 	p := c.pieces[piece]
 	if p == nil {
 		// A block that was in flight when we abandoned this piece on a seek still
@@ -1489,14 +1657,19 @@ func (c *Cache) writePiece(piece int, offset int64, src []byte) (int, error) {
 	c.mu.Unlock()
 	n, err := p.WriteAt(src, offset)
 	if n > 0 {
-		// Wake any Read parked on this piece: with block-level (responsive) serving
-		// it may already be satisfiable by this very block. No-op (one uncontended
-		// mutex) when nobody waits; the waiter re-checks its predicate, so waking on
-		// a block that doesn't cover its offset just re-parks it.
 		c.signalPieceProgress(piece)
-		go c.evictIfOverCapacity()
+		c.triggerEvict()
 	}
 	return n, err
+}
+
+// triggerEvict coalesces per-16KB-block eviction checks without spawning a
+// fresh goroutine on every arriving block when a pass is already running.
+func (c *Cache) triggerEvict() {
+	c.evictAgain.Store(true)
+	if c.evicting.CompareAndSwap(false, true) {
+		go c.runEvictLoop()
+	}
 }
 
 // clearAbandoned removes a piece's abandoned mark so a writePiece for it stores
@@ -1521,27 +1694,18 @@ func (c *Cache) clearAbandoned(piece int) {
 // to evict; if every spare piece is somehow protected we leave the cache a touch
 // over budget rather than evict the playing window.
 func (c *Cache) evictIfOverCapacity() {
-	// Single-flight: at most one eviction pass runs at a time. writePiece spawns a pass
-	// on EVERY 16 KB block, so a fast download would otherwise fire hundreds of
-	// overlapping passes per second, each doing a full reader + anchor walk
-	// (readerProtectRanges) under readersMu and contending with the streaming Read path.
-	if !c.evicting.CompareAndSwap(false, true) {
-		// A pass is already running. Record that more work arrived so it re-runs after
-		// finishing, instead of dropping this trigger — that re-run is what keeps filled
-		// from drifting above cap between passes under a fast download.
-		c.evictAgain.Store(true)
-		return
-	}
+	c.evictSyncMu.Lock()
+	defer c.evictSyncMu.Unlock()
+	c.evictPass()
+}
+
+func (c *Cache) runEvictLoop() {
 	for {
 		c.evictAgain.Store(false)
+		c.evictSyncMu.Lock()
 		evicted := c.evictPass()
+		c.evictSyncMu.Unlock()
 		c.evicting.Store(false)
-		// Re-run only while passes are actually freeing space AND a trigger arrived
-		// mid-pass (its CompareAndSwap failed, so it set evictAgain). A pass that evicted
-		// nothing is already at/under cap — stop, and let the next over-cap write
-		// re-trigger a fresh pass; this drives filled down to the budget under coalesced
-		// triggers without spinning empty passes during the cache-fill ramp (filled < cap).
-		// The re-acquire hands the loop to whichever goroutine wins, so exactly one runs.
 		if !evicted || !c.evictAgain.Load() || !c.evicting.CompareAndSwap(false, true) {
 			return
 		}
@@ -1549,28 +1713,20 @@ func (c *Cache) evictIfOverCapacity() {
 }
 
 // evictPass is one capacity-trim pass: reap stranded incomplete leftovers, then LRU-evict
-// complete pieces until filled<=cap, never touching a protected window/pin. Returns
-// whether it evicted anything, so the single-flight loop in evictIfOverCapacity knows
-// whether another pass could free more. The caller holds the evicting guard.
+// complete pieces until memUsed<=cap, never touching a protected window/pin.
 func (c *Cache) evictPass() (evictedAny bool) {
-	// Build the protect set ONCE and derive capacity from it (capacityFor), instead of
-	// capacity() and readerProtectRanges() each walking the readers + recomputing every
-	// device anchor independently in the same pass.
 	protect := c.readerProtectRanges()
 	cap := c.capacityFor(protect)
 	if cap <= 0 {
 		return evictedAny
 	}
-	filled := c.Filled()
+	used := c.memUsed()
 	c.mu.Lock()
 	pieces := make([]*Piece, 0, len(c.pieces))
 	for _, p := range c.pieces {
 		pieces = append(pieces, p)
 	}
 	c.mu.Unlock()
-	// Diagnostic context: the live held playhead window so an evict line can be read
-	// against the ACTUAL window (the first-window log is stale). Single device in the
-	// common case; with two, the last wins — enough to spot an in-window evict.
 	dbg := false
 	winLo, winHi := -1, -1
 	if s := settings.BTsets(); s != nil && s.EnableDebug {
@@ -1582,18 +1738,10 @@ func (c *Cache) evictPass() (evictedAny bool) {
 	}
 
 	evict := func(p *Piece) {
-		// We deliberately do NOT WeDontHave here: un-having every evicted piece
-		// churns the piece_picker and stalls the whole download once eviction
-		// starts mid-stream. The have-bitfield is reconciled lazily, on demand, by
-		// the Reader (ensurePieceLocked) if it ever needs an evicted piece back.
 		if dbg {
-			// Pair with "REFETCH evicted piece N": a piece evicted here and refetched
-			// soon after is the download-then-drop-then-redownload churn. complete=false
-			// means an incomplete/abandoned leftover (a stranded seek partial). An
-			// evicted piece INSIDE [win] is a real bug; one above it is read-ahead.
 			log.TLogln("torrstor.Cache: evict piece", p.Id, "complete", p.Complete(),
 				"size", p.SizeBytes()>>20, "MB win", winLo, "..", winHi,
-				"filled", int(filled>>20), "cap", int(cap>>20))
+				"used", int(used>>20), "cap", int(cap>>20))
 		}
 		p.wipe()
 		c.mu.Lock()
@@ -1601,30 +1749,13 @@ func (c *Cache) evictPass() (evictedAny bool) {
 		c.mu.Unlock()
 		evictedAny = true
 	}
-	// Never evict an INCOMPLETE piece during the capacity trim: its blocks live only
-	// in this cache and libtorrent may finish it later (end-game, an unchoke, a
-	// re-prioritised window); the hash check then reads it back through us, the
-	// wiped blocks return as garbage, the hash fails, and libtorrent bans the
-	// innocent peers that sent the rest ("too many corrupt pieces") — on a small
-	// swarm that bans the only seed and the stream dies. Incomplete leftovers are
-	// bounded, and a stranded one is reaped separately below once abandoned.
 	evictable := func(p *Piece) bool { return p.SizeBytes() > 0 && p.Complete() }
 
-	// First, reap STRANDED INCOMPLETE leftovers: a seek leaves partial pieces in the
-	// abandoned playback region; they get no more blocks (Accessed stops advancing)
-	// and complete-only eviction can't touch them, so they'd linger forever. Once
-	// untouched past abandonEvictSec and OUTSIDE the protected window, forget them
-	// (WeDontHave priority 0 so the picker won't re-request — makes the wipe safe)
-	// and drop them.
 	nowU := time.Now().Unix()
 	for _, p := range pieces {
 		if p.SizeBytes() <= 0 || p.Complete() || pieceInRanges(p.Id, protect) {
 			continue
 		}
-		// A fully-sized incomplete piece isn't stranded: it has all its blocks and
-		// is queued for hashing. Give it the long hash grace so the (bounded, so
-		// possibly slow) hash worker reads it back before the reap can wipe it.
-		// Genuinely stranded PARTIALS keep the short abandon timer.
 		grace := int64(abandonEvictSec)
 		if p.SizeBytes() >= c.PieceLength {
 			grace = hashGraceSec
@@ -1640,26 +1771,16 @@ func (c *Cache) evictPass() (evictedAny bool) {
 		}
 	}
 
-	// LRU eviction (the original TorrServer "snake" model): drop complete pieces ONLY
-	// when over capacity, least-recently-ACCESSED first, and never inside a reader's
-	// window/pins. We deliberately do NOT proactively reap every piece outside the
-	// window the moment the anchor passes it — that was the post-seek refetch churn:
-	// a forward seek reaped the abandoned old region at once, throwing away the LRU
-	// sacrificial buffer; then when the read-ahead connection raced forward and the
-	// readahead needed room, the only spare pieces left were the JUST-read behind ones,
-	// so they were evicted and the player's lagging decoder refetched them. Keeping the
-	// cache a pure LRU ring (recently-read pieces stay until genuinely old) lets the
-	// stale old region absorb the eviction pressure instead, so the snake's trailing
-	// pieces survive the player's re-read/decode lag — exactly as upstream behaves
-	// (cleanPieces only runs when filled > capacity; Accessed is bumped on every read).
-	filled = c.Filled() // recompute: the stranded-leftover reap above may have freed space
-	if filled <= cap {
+	// Recompute memory held by piece buffers (counts full allocated RAM slices in
+	// RAM mode per upstream #955, not just logical received bytes).
+	used = c.memUsed()
+	if used <= cap {
 		return evictedAny
 	}
 	sort.Slice(pieces, func(i, j int) bool {
 		return pieces[i].Accessed() < pieces[j].Accessed()
 	})
-	needFree := filled - cap
+	needFree := used - cap
 	for _, p := range pieces {
 		if needFree <= 0 {
 			return evictedAny
@@ -1667,7 +1788,10 @@ func (c *Cache) evictPass() (evictedAny bool) {
 		if !evictable(p) || pieceInRanges(p.Id, protect) {
 			continue
 		}
-		sz := p.SizeBytes()
+		sz := p.memCost()
+		if sz <= 0 {
+			sz = p.SizeBytes()
+		}
 		evict(p)
 		needFree -= sz
 	}
@@ -1696,7 +1820,11 @@ func (c *Cache) readerProtectRanges() [][2]int {
 		if lo < 0 {
 			lo = 0
 		}
-		out = append(out, [2]int{lo, ph + aheadP + margin})
+		hi := ph + aheadP + margin
+		if c.NumPieces > 0 && hi >= c.NumPieces {
+			hi = c.NumPieces - 1
+		}
+		out = append(out, [2]int{lo, hi})
 	}
 	// Every streamed file's EOF seek index (AVI idx1 / MKV cues / MP4 moov) sits at
 	// the file END, never inside the forward window, but the player reads it to parse
@@ -1875,20 +2003,17 @@ func (c *Cache) SetPreloadReserve(ranges [][2]int) {
 // window and wrongly cleared the reserve), but its cur is near EOF — far from the
 // head — so it must NOT clear. Dropping the reserve there evicted the just-preloaded
 // head, which re-downloaded from scratch ("after preload the cache resets").
-func (c *Cache) preloadHeadTakenOver(cur int) bool {
+func (c *Cache) preloadHeadTakenOver(cur, fileFirst, fileLast int) bool {
 	c.preloadMu.Lock()
 	defer c.preloadMu.Unlock()
 	if len(c.preloadProtect) == 0 {
 		return true
 	}
-	head := c.preloadProtect[0] // SetPreloadReserve always lists the head range first
-	// cur must be PAST the first piece, not just inside the head: a player reads the
-	// container header AND (for AVI idx1 / MKV cues at the file END) the tail index
-	// before it can start, while the head reader still sits on piece 0. Clearing then
-	// drops the still-needed tail (the idx1 read then times out and the stream never
-	// starts). Requiring cur > head[0] holds head+tail until real playback advances,
-	// by when the index has been read. The EOF index probe (cur near EOF) never matches.
-	return cur > head[0] && cur <= head[1]
+	// Require cur to advance past the streamed file's first piece while excluding
+	// the EOF tail-index probe, so real playback on ANY file (including a resume
+	// mid-episode or switching to Episode 2) releases the preload reservation cleanly.
+	tailStart := fileLast - c.tailPinPieces() + 1
+	return cur > fileFirst && (tailStart <= fileFirst+1 || cur < tailStart)
 }
 
 // ClearPreloadReserve releases the preload reservation (the joining client's
@@ -1903,7 +2028,7 @@ func (c *Cache) ClearPreloadReserve() {
 	}
 	c.preloadProtect = nil
 	c.preloadMu.Unlock()
-	go c.evictIfOverCapacity()
+	c.triggerEvict()
 }
 
 // Have reports whether the piece has been fully written to the cache.
@@ -1946,13 +2071,25 @@ func (c *Cache) PiecesSnapshot() map[int]state.ItemState {
 	return out
 }
 
-// Filled returns the total bytes resident in the cache.
+// Filled returns the total logical payload bytes resident in the cache.
 func (c *Cache) Filled() int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	var sum int64
 	for _, p := range c.pieces {
 		sum += p.SizeBytes()
+	}
+	return sum
+}
+
+// memUsed returns the actual memory budget occupied by pieces (allocated RAM
+// slice capacity in RAM mode, file bytes in UseDisk mode — see upstream #955).
+func (c *Cache) memUsed() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var sum int64
+	for _, p := range c.pieces {
+		sum += p.memCost()
 	}
 	return sum
 }
@@ -2002,7 +2139,11 @@ func (c *Cache) ReadersSnapshot() []*state.ReaderState {
 		if lo < 0 {
 			lo = 0
 		}
-		out = append(out, &state.ReaderState{Start: lo, End: ph + aheadP, Reader: ph})
+		hi := ph + aheadP
+		if c.NumPieces > 0 && hi >= c.NumPieces {
+			hi = c.NumPieces - 1
+		}
+		out = append(out, &state.ReaderState{Start: lo, End: hi, Reader: ph})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Reader < out[j].Reader })
 	return out

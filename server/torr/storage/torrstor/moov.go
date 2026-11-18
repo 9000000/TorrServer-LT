@@ -56,6 +56,8 @@ func (c *Cache) LocateMoov(ctx context.Context, lh *lt.Torrent, fileOffset, file
 				}
 				_ = lh.SetPiecePriority(piece, 7)
 				_ = lh.SetPieceDeadline(piece, 0, false)
+				c.TrackDeadline(piece)
+				c.InvalidatePriorities()
 				if !c.WaitForPiece(ctx, piece) {
 					return nil, false
 				}

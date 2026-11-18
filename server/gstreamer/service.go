@@ -617,21 +617,25 @@ func (s *Service) Get(id string) *Task {
 	return task
 }
 
-// GetAnyForHash returns a live task of the torrent (any viewer), for torrent-level requests such as the
-// heartbeat requested with the bare hash.
+// GetAnyForHash refreshes LastActive on all live tasks of the torrent and
+// returns one of them (any viewer), for torrent-level requests such as the
+// heartbeat requested with the bare hash so multi-viewer sessions stay alive.
 func (s *Service) GetAnyForHash(hash string) *Task {
 	if hash == "" || s.disposed.Load() {
 		return nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var found *Task
 	for id, task := range s.tasks {
 		if HashOfTaskID(id) == hash && task != nil && !task.IsDisposed() {
 			task.UpdateLastActive()
-			return task
+			if found == nil {
+				found = task
+			}
 		}
 	}
-	return nil
+	return found
 }
 
 func (s *Service) hasTasksForHash(hash string) bool {

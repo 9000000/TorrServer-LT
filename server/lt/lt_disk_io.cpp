@@ -18,6 +18,9 @@
 #include <libtorrent/disk_interface.hpp>
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/hasher.hpp>
+#if __has_include(<libtorrent/hasher256.hpp>)
+#include <libtorrent/hasher256.hpp>
+#endif
 #include <libtorrent/io_context.hpp>
 #include <libtorrent/peer_request.hpp>
 #include <libtorrent/session_params.hpp>
@@ -25,6 +28,7 @@
 #include <libtorrent/units.hpp>
 #include <libtorrent/version.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -134,9 +138,17 @@ struct storage_state {
 
 // One queued piece-hash request handed to the hashing thread pool.
 struct hash_job {
+    lt::storage_index_t       s;
+    lt::piece_index_t         piece;
+    lt::span<lt::sha256_hash> v2;
+    std::function<void(lt::piece_index_t, lt::sha1_hash const&, lt::storage_error const&)> handler;
+};
+
+struct hash2_job {
     lt::storage_index_t s;
     lt::piece_index_t   piece;
-    std::function<void(lt::piece_index_t, lt::sha1_hash const&, lt::storage_error const&)> handler;
+    int                 offset;
+    std::function<void(lt::piece_index_t, lt::sha256_hash const&, lt::storage_error const&)> handler;
 };
 
 class tsl_disk_io final
@@ -280,14 +292,13 @@ public:
 
     void async_hash(lt::storage_index_t s,
                     lt::piece_index_t piece,
-                    lt::span<lt::sha256_hash> /*v2*/,
+                    lt::span<lt::sha256_hash> v2,
                     lt::disk_job_flags_t /*flags*/,
                     std::function<void(lt::piece_index_t, lt::sha1_hash const&, lt::storage_error const&)> handler) override
     {
-        // Hand the read + SHA-1 to a worker so it runs off the network thread.
-        // If the pool is already stopped (shutdown), hash inline so the
-        // completion handler always fires and libtorrent never wedges.
-        hash_job job{s, piece, std::move(handler)};
+        // Hand the read + SHA-1 (and v2 SHA-256 block hashes for hybrid torrents)
+        // to a worker so it runs off the network thread.
+        hash_job job{s, piece, v2, std::move(handler)};
         {
             std::lock_guard<std::mutex> lk(hash_mu_);
             if (!hash_stop_ && !hash_threads_.empty()) {
@@ -299,17 +310,22 @@ public:
         run_hash(std::move(job));
     }
 
-    void async_hash2(lt::storage_index_t,
+    void async_hash2(lt::storage_index_t s,
                      lt::piece_index_t piece,
-                     int /*offset*/,
-                     lt::disk_job_flags_t,
+                     int offset,
+                     lt::disk_job_flags_t /*flags*/,
                      std::function<void(lt::piece_index_t, lt::sha256_hash const&, lt::storage_error const&)> handler) override
     {
-        lt::storage_error se;
-        se.ec = lt::error_code(boost::system::errc::function_not_supported, lt::system_category());
-        lt::post(io_, [h = std::move(handler), piece, se]() mutable {
-            h(piece, lt::sha256_hash{}, se);
-        });
+        hash2_job job{s, piece, offset, std::move(handler)};
+        {
+            std::lock_guard<std::mutex> lk(hash_mu_);
+            if (!hash_stop_ && !hash_threads_.empty()) {
+                hash2_queue_.push_back(std::move(job));
+                hash_cv_.notify_one();
+                return;
+            }
+        }
+        run_hash2(std::move(job));
     }
 
     // ----- async maintenance ----- (handlers posted to io_, see async_read)
@@ -405,47 +421,139 @@ private:
     // async_hash had — cb_.read is RLock-guarded on the Go side and lt::post is
     // thread-safe, so several workers can hash different pieces concurrently.
     void run_hash(hash_job job) {
-        int piece_actual = 0;
-        {
-            std::shared_lock<std::shared_mutex> lk(map_mu_);
-            auto it = storages_.find(storage_id_of(job.s));
-            if (it == storages_.end()) {
-                lk.unlock();
-                auto err = make_io_error("hash:no-storage");
+        try {
+            int piece_actual = 0;
+            int piece_actual2 = 0;
+            {
+                std::shared_lock<std::shared_mutex> lk(map_mu_);
+                auto it = storages_.find(storage_id_of(job.s));
+                if (it == storages_.end() ||
+                    job.piece < lt::piece_index_t{0} ||
+                    static_cast<int>(job.piece) >= it->second.num_pieces) {
+                    lk.unlock();
+                    auto err = make_io_error("hash:no-storage");
+                    lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
+                        h(piece, lt::sha1_hash{}, err);
+                    });
+                    return;
+                }
+                piece_actual = static_cast<int>(it->second.files->piece_size(job.piece));
+                if (!job.v2.empty()) {
+                    piece_actual2 = static_cast<int>(it->second.files->piece_size2(job.piece));
+                }
+            }
+            if (piece_actual <= 0) {
+                auto err = make_io_error("hash:bad-size");
                 lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
                     h(piece, lt::sha1_hash{}, err);
                 });
                 return;
             }
-            piece_actual = static_cast<int>(it->second.files->piece_size(job.piece));
+            // Reuse a per-worker-thread scratch buffer so 4K Remux streaming doesn't
+            // malloc + zero-fill + free 4-16 MiB on every completed piece.
+            thread_local std::vector<char> data;
+            if (data.capacity() > (32u << 20) && piece_actual <= (16 << 20)) {
+                std::vector<char>().swap(data);
+            }
+            data.resize(static_cast<size_t>(piece_actual));
+            int got = cb_.read(storage_id_of(job.s), static_cast<int>(job.piece),
+                               0, reinterpret_cast<uint8_t*>(data.data()), piece_actual);
+            if (got < 0) got = 0;
+            if (got < piece_actual) {
+                std::memset(data.data() + got, 0, static_cast<size_t>(piece_actual - got));
+            }
+            // Populate per-16KiB-block SHA-256 hashes for hybrid (v1+v2) torrents.
+            if (!job.v2.empty() && piece_actual2 > 0) {
+                constexpr int kBlockSize = 0x4000;
+                int idx = 0;
+                for (int off = 0; off < piece_actual2 && idx < static_cast<int>(job.v2.size()); off += kBlockSize, ++idx) {
+                    int blk = std::min(kBlockSize, piece_actual2 - off);
+                    lt::hasher256 h2;
+                    h2.update(lt::span<char const>(data.data() + off, blk));
+                    job.v2[idx] = h2.final();
+                }
+            }
+            lt::hasher h;
+            h.update(lt::span<char const>(data.data(), piece_actual));
+            auto digest = h.final();
+            lt::post(io_, [hd = std::move(job.handler), piece = job.piece, digest]() mutable {
+                hd(piece, digest, lt::storage_error{});
+            });
+        } catch (...) {
+            auto err = make_io_error("hash:exception");
+            lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
+                h(piece, lt::sha1_hash{}, err);
+            });
         }
-        std::vector<char> data(static_cast<size_t>(piece_actual)); // zero-initialised
-        int got = cb_.read(storage_id_of(job.s), static_cast<int>(job.piece),
-                           0, reinterpret_cast<uint8_t*>(data.data()), piece_actual);
-        // A short read means the piece was evicted from the RAM cache between its
-        // last write and this hash (the bounded hash pool can lag the reap). Do NOT
-        // fault: a storage_error here is read as fatal disk corruption and pauses the
-        // torrent. Instead hash whatever we read, zero-padded — the digest then won't
-        // match the expected hash, so libtorrent simply re-downloads the piece. An
-        // in-RAM cache must never be able to pause the torrent over an eviction.
-        (void)got;
-        lt::hasher h;
-        h.update(lt::span<char const>(data.data(), piece_actual));
-        auto digest = h.final();
-        lt::post(io_, [hd = std::move(job.handler), piece = job.piece, digest]() mutable {
-            hd(piece, digest, lt::storage_error{});
-        });
+    }
+
+    void run_hash2(hash2_job job) {
+        try {
+            int piece_actual2 = 0;
+            {
+                std::shared_lock<std::shared_mutex> lk(map_mu_);
+                auto it = storages_.find(storage_id_of(job.s));
+                if (it == storages_.end() ||
+                    job.piece < lt::piece_index_t{0} ||
+                    static_cast<int>(job.piece) >= it->second.num_pieces) {
+                    lk.unlock();
+                    auto err = make_io_error("hash2:no-storage");
+                    lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
+                        h(piece, lt::sha256_hash{}, err);
+                    });
+                    return;
+                }
+                piece_actual2 = static_cast<int>(it->second.files->piece_size2(job.piece));
+            }
+            constexpr int kBlockSize = 0x4000;
+            if (job.offset < 0 || job.offset >= piece_actual2) {
+                auto err = make_io_error("hash2:bad-offset");
+                lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
+                    h(piece, lt::sha256_hash{}, err);
+                });
+                return;
+            }
+            int blk = std::min(kBlockSize, piece_actual2 - job.offset);
+            char buf[kBlockSize];
+            int got = cb_.read(storage_id_of(job.s), static_cast<int>(job.piece),
+                               job.offset, reinterpret_cast<uint8_t*>(buf), blk);
+            if (got < 0) got = 0;
+            if (got < blk) {
+                std::memset(buf + got, 0, static_cast<size_t>(blk - got));
+            }
+            lt::hasher256 h2;
+            h2.update(lt::span<char const>(buf, blk));
+            auto digest = h2.final();
+            lt::post(io_, [hd = std::move(job.handler), piece = job.piece, digest]() mutable {
+                hd(piece, digest, lt::storage_error{});
+            });
+        } catch (...) {
+            auto err = make_io_error("hash2:exception");
+            lt::post(io_, [h = std::move(job.handler), piece = job.piece, err]() mutable {
+                h(piece, lt::sha256_hash{}, err);
+            });
+        }
     }
 
     void hash_worker() {
         for (;;) {
             std::unique_lock<std::mutex> lk(hash_mu_);
-            hash_cv_.wait(lk, [this]{ return hash_stop_ || !hash_queue_.empty(); });
-            if (hash_queue_.empty()) return; // stop requested and queue drained
-            hash_job job = std::move(hash_queue_.front());
-            hash_queue_.pop_front();
-            lk.unlock();
-            run_hash(std::move(job));
+            hash_cv_.wait(lk, [this]{ return hash_stop_ || !hash_queue_.empty() || !hash2_queue_.empty(); });
+            if (!hash_queue_.empty()) {
+                hash_job job = std::move(hash_queue_.front());
+                hash_queue_.pop_front();
+                lk.unlock();
+                run_hash(std::move(job));
+                continue;
+            }
+            if (!hash2_queue_.empty()) {
+                hash2_job job = std::move(hash2_queue_.front());
+                hash2_queue_.pop_front();
+                lk.unlock();
+                run_hash2(std::move(job));
+                continue;
+            }
+            return; // stop requested and queues drained
         }
     }
 
@@ -477,24 +585,16 @@ private:
     std::mutex               hash_mu_;
     std::condition_variable  hash_cv_;
     std::deque<hash_job>     hash_queue_;
+    std::deque<hash2_job>    hash2_queue_;
     bool                     hash_stop_ = false;
 };
-
-// Factory used by session_params.disk_io_constructor. Captures the
-// callback snapshot taken at session_new time via a function-local
-// static — see tsl_install_disk_io_on().
-tsl_storage_callbacks g_session_cb{};
-
-std::unique_ptr<lt::disk_interface> tsl_make_disk_io(
-    lt::io_context& io, lt::settings_interface const& s, lt::counters& cnt)
-{
-    return std::make_unique<tsl_disk_io>(io, s, cnt, g_session_cb);
-}
 
 } // namespace
 
 void tsl_install_disk_io_on(lt::session_params& params) {
     if (!tsl_has_storage_callbacks()) return;
-    g_session_cb = current_callbacks();
-    params.disk_io_constructor = &tsl_make_disk_io;
+    tsl_storage_callbacks cb = current_callbacks();
+    params.disk_io_constructor = [cb](lt::io_context& io, lt::settings_interface const& s, lt::counters& cnt) -> std::unique_ptr<lt::disk_interface> {
+        return std::make_unique<tsl_disk_io>(io, s, cnt, cb);
+    };
 }

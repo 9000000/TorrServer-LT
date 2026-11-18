@@ -89,7 +89,7 @@ func Start() {
 	}
 
 	route := gin.New()
-	route.Use(log.WebLogger(), waf.WAF(), gin.Recovery(), cors.New(corsCfg), location.Default())
+	route.Use(waf.WAF(), limitRequestBody(), log.WebLogger(), gin.Recovery(), cors.New(corsCfg), location.Default())
 	auth.SetupAuth(route)
 
 	route.GET("/echo", echo)
@@ -130,9 +130,12 @@ func Start() {
 			log.TLogln("Fix --sslcert/--sslkey, or clear them in settings to get a self-signed certificate. HTTP keeps running.")
 			settings.Ssl = false
 		} else if changed {
-			settings.BTsets().SslCert, settings.BTsets().SslKey = cert, key
-			log.TLogln("Saving path to ssl cert and key in db", cert, key)
-			settings.SetBTSets(settings.BTsets())
+			if cur := settings.BTsets(); cur != nil {
+				cp := *cur
+				cp.SslCert, cp.SslKey = cert, key
+				log.TLogln("Saving path to ssl cert and key in db", cert, key)
+				settings.SetBTSets(&cp)
+			}
 		}
 	}
 
@@ -269,6 +272,7 @@ func Stop() {
 	}
 	shutdownServers()
 	settings.InternalPort = ""
+	rutor.Stop()
 	gstreamer.Stop()
 	dlna.Stop()
 	bonjour.Stop()
@@ -276,6 +280,17 @@ func Stop() {
 	fuse.FuseCleanup()
 	BTS.Disconnect()
 	waitChan <- nil
+}
+
+const maxHTTPRequestBodyBytes = 64 << 20 // 64 MiB
+
+func limitRequestBody() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request != nil && c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxHTTPRequestBodyBytes)
+		}
+		c.Next()
+	}
 }
 
 // echo godoc

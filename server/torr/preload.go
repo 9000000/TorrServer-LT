@@ -107,21 +107,9 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	lh := t.handle()
 
 	// Resolve the file the same way Stream does: `index` is the 1-based API
-	// file id (FileStats.Id), which we map to a path and then to the file.
-	var path string
-	for _, fs := range t.Status().FileStats {
-		if fs.Id == index {
-			path = fs.Path
-			break
-		}
-	}
-	var f *File
-	for _, ff := range t.Files() {
-		if path != "" && ff.Path == path {
-			f = ff
-			break
-		}
-	}
+	// file id (FileStats.Id), which we map to a path and then to the file
+	// (including the single-file Smart Indexing fallback).
+	f := t.fileByID(index)
 	if f == nil {
 		return
 	}
@@ -240,6 +228,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 				_ = lh.SetPiecePriority(p, 7)
 			}
 			_ = lh.SetPieceDeadline(p, (startN+i)*10, false)
+			cache.TrackDeadline(p)
 		}
 	}
 
@@ -367,18 +356,18 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	// the configured cap is authoritative (strict). Only burst when no reader is active
 	// (an initial play / explicit &preload), never mid-stream — a running stream keeps its
 	// strict cap and pausing/churning peers would hiccup it.
-	configuredConns := 50
+	configuredConns := 100
 	if settings.BTsets() != nil && settings.BTsets().ConnectionsLimit > 0 {
 		configuredConns = settings.BTsets().ConnectionsLimit
 	}
-	if cache.ActiveReaders() == 0 {
+	if cache.StreamingReaders() == 0 {
 		burst := configuredConns
 		if preloadConnections > burst {
 			burst = preloadConnections
 		}
 		_ = lh.SetMaxConnections(burst)
 		defer func() {
-			if cache.ActiveReaders() == 0 && !preloadOK {
+			if cache.StreamingReaders() == 0 && !preloadOK {
 				_ = lh.SetMaxConnections(configuredConns)
 			}
 		}()
@@ -471,6 +460,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 			for _, p := range gatePieces {
 				if st, ok := snap[p]; !ok || !st.Completed {
 					_ = lh.SetPieceDeadline(p, 0, false)
+					cache.TrackDeadline(p)
 				}
 			}
 		}
@@ -575,12 +565,12 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 	t.mu.Unlock()
 	t.AddExpiredTime(torrentExpireTimeout())
 
-	// Seamless handoff:
+	// Seamless handoff (&preload path only, probe=true):
 	// Keep the swarm hot and actively download a readahead window PAST the head
-	// while the client launches the player.
-	// We run this in a background goroutine so Preload returns immediately to the HTTP
-	// caller, bridging the gap without stalling or dropping fast seed connections.
-	if preloadOK {
+	// while the client launches its external player. On the &play path (probe=false)
+	// the reader opens in the SAME HTTP request immediately after this returns, so
+	// spawning a warm goroutine would only race against applyStreamPriorities.
+	if preloadOK && probe && cache.StreamingReaders() == 0 {
 		budget := int(0)
 		if s := settings.BTsets(); s != nil && s.CacheSize > 0 {
 			budget = int(s.CacheSize / plen)
@@ -607,13 +597,6 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 
 			lead := min(headDeadlineLeadPieces, len(wPieces))
 			for {
-				if len(wPieces) > 0 {
-					prioritise(wPieces[:lead], 0)
-					if lead < len(wPieces) {
-						prioritiseNoDeadline(wPieces[lead:])
-					}
-				}
-
 				// If a streaming reader has joined, it owns scheduling now (via applyStreamPriorities).
 				// Exit cleanly WITHOUT zeroing out priorities, allowing the reader to seamlessly
 				// inherit the hot swarm and active download window.
@@ -621,32 +604,50 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 					return
 				}
 
+				if len(wPieces) > 0 {
+					prioritise(wPieces[:lead], 0)
+					if lead < len(wPieces) {
+						prioritiseNoDeadline(wPieces[lead:])
+					}
+					cache.InvalidatePriorities()
+				}
+
 				select {
 				case <-warmCtx.Done():
 					// Grace period elapsed without any player connecting:
-					// Zero out priorities so an abandoned preload doesn't leak bandwidth.
+					// Zero out priorities/deadlines and clear reserve so an abandoned
+					// preload never leaks bandwidth or cache capacity.
 					for _, p := range gPieces {
 						_ = lh.SetPiecePriority(p, 0)
+						_ = lh.ResetPieceDeadline(p)
 					}
 					for _, p := range wPieces {
 						_ = lh.SetPiecePriority(p, 0)
+						_ = lh.ResetPieceDeadline(p)
 					}
-					if cache.ActiveReaders() == 0 {
+					cache.ClearPreloadReserve()
+					cache.InvalidatePriorities()
+					if cache.StreamingReaders() == 0 {
 						_ = lh.SetMaxConnections(configuredConns)
 					}
 					return
 				case <-t.closeCh:
+					cache.ClearPreloadReserve()
 					return
 				case <-warmTick.C:
 					continue
 				}
 			}
 		}(gatePieces, warmPieces)
-	} else {
+	} else if !preloadOK {
 		// Preload failed or was cancelled: clean up immediately.
 		for _, p := range gatePieces {
 			_ = lh.SetPiecePriority(p, 0)
+			_ = lh.ResetPieceDeadline(p)
 		}
+		cache.InvalidatePriorities()
+	} else {
+		cache.InvalidatePriorities()
 	}
 
 	log.TLogln("torr.Preload:", t.Name(), "buffered head", headFirst, "..", headLast,
@@ -790,44 +791,46 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 	// INITIAL fill (same file): it must WAIT for that fill, not stream a half-buffer (the
 	// impatient-player reconnect path) — so that case falls through to the gate below.
 	torr.preloadGateMu.Lock()
+	if torr.preloadGateDone != nil && torr.preloadGateIndex == index {
+		done := torr.preloadGateDone
+		torr.preloadGateMu.Unlock()
+		dbg("wait: fill already in flight for this file")
+		waitBounded(reqCtx, done)
+		return
+	}
 	if torr.playStarted {
-		inflightFirstFill := torr.preloadGateDone != nil && torr.preloadGateIndex == index
-		if !inflightFirstFill {
-			torr.preloadGateMu.Unlock()
-			dbg("skip: torrent already started (single-file semantics) — stream directly")
-			return
-		}
-	} else {
-		torr.playStarted = true
-		torr.playStartIndex = index
+		torr.preloadGateMu.Unlock()
+		dbg("skip: torrent already started (single-file semantics) — stream directly")
+		return
 	}
 	torr.preloadGateMu.Unlock()
+
+	markStarted := func() {
+		torr.preloadGateMu.Lock()
+		if !torr.playStarted {
+			torr.playStarted = true
+			torr.playStartIndex = index
+		}
+		torr.preloadGateMu.Unlock()
+	}
 
 	if cache := torrstor.Global().CacheByHash([20]byte(torr.Hash())); cache != nil && cache.PieceLength > 0 {
 		if f := torr.fileByID(index); f != nil {
 			if hl := preloadHeadLastPiece(f, cache.PieceLength, cache.NumPieces); cache.Have(hl) {
+				markStarted()
 				dbg("skip: head already resident, headLast", hl)
 				return
 			}
 			// The file is ALREADY being played: a reader sits inside the file
 			// BODY (past the head buffer, before the tail index window). Do NOT
-			// re-fire the full preload from piece 0. This catches the player that
-			// periodically re-reads the container header mid-playback with a fresh
-			// `Range: bytes=0-` (VLC does this) — the head buffer it asks for has
-			// long since been evicted as playback moved forward on a small cache,
-			// so the head-residency check above no longer short-circuits, and
-			// without this guard every such re-read re-prioritised PreloadCache%%
-			// of the cache from the file start, evicting the playhead and looping
-			// (reproduced: 3× `bytes=0-` → 3× full head re-buffer). The tail
-			// window is excluded so the SECOND connection a player opens to read
-			// the container index at EOF (MKV cues / AVI idx1) doesn't count as
-			// "playing the body" and wrongly suppress the genuine first preload.
+			// re-fire the full preload from piece 0.
 			plen := cache.PieceLength
 			headFirst := int(f.Offset / plen)
 			tailLast := int((f.Offset + f.Length - 1) / plen)
 			tailFirst := tailLast - torrstor.TailPiecesFor(plen) + 1 // same tail as the pin
 			for _, rs := range cache.ReadersSnapshot() {
 				if rs != nil && rs.Reader >= headFirst && rs.Reader < tailFirst {
+					markStarted()
 					dbg("skip: file already playing, body reader at", rs.Reader)
 					return
 				}
@@ -839,10 +842,12 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 			isPreloading := torr.Stat == state.TorrentPreload
 			torr.mu.Unlock()
 			if isPreloading && cache.Have(headFirst) {
+				markStarted()
 				dbg("skip: explicit preload in flight and headFirst resident, stream directly")
 				return
 			}
 			if isPreloading {
+				markStarted()
 				dbg("wait: explicit preload in flight, waiting for headFirst")
 				waitTick := time.NewTicker(100 * time.Millisecond)
 				defer waitTick.Stop()
@@ -871,12 +876,17 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 	torr.preloadGateMu.Lock()
 	// A fill for THIS file is already in flight: wait on that same fill, never
 	// start a second one and never skip onto a half-buffer (this is the reconnect
-	// path after an impatient player dropped the first connection).
+	// or concurrent initial connection path).
 	if torr.preloadGateDone != nil && torr.preloadGateIndex == index {
 		done := torr.preloadGateDone
 		torr.preloadGateMu.Unlock()
 		dbg("wait: fill already in flight for this file")
 		waitBounded(reqCtx, done)
+		return
+	}
+	if torr.playStarted {
+		torr.preloadGateMu.Unlock()
+		dbg("skip: torrent started concurrently — stream directly")
 		return
 	}
 	// A fill for a DIFFERENT file is in flight, or one finished within the
@@ -886,8 +896,11 @@ func PreloadOnPlay(reqCtx context.Context, torr *Torrent, index int) {
 		dbg("skip: other-file fill in flight or within debounce")
 		return
 	}
-	// Start a detached fill for this file and remember it so reconnects can wait.
+	// Atomically mark playStarted alongside preloadGateDone so a racing second
+	// connection for the same file sees preloadGateDone != nil and waits on it.
 	done := make(chan struct{})
+	torr.playStarted = true
+	torr.playStartIndex = index
 	torr.preloadGateIndex = index
 	torr.preloadGateDone = done
 	torr.preloadGateMu.Unlock()
@@ -924,15 +937,16 @@ func (t *Torrent) fileByID(index int) *File {
 	if t == nil {
 		return nil
 	}
+	fileStats := t.Status().FileStats
 	var path string
-	for _, fs := range t.Status().FileStats {
+	for _, fs := range fileStats {
 		if fs.Id == index {
 			path = fs.Path
 			break
 		}
 	}
-	if path == "" && len(t.Status().FileStats) == 1 && index == 1 {
-		path = t.Status().FileStats[0].Path
+	if path == "" && len(fileStats) == 1 && index == 1 {
+		path = fileStats[0].Path
 	}
 	if path == "" {
 		return nil

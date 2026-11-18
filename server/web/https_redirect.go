@@ -11,7 +11,7 @@ import (
 
 // mediaPathPrefixes stay on plain HTTP with --force-https --http-media, as do the
 // GStreamer HLS paths under /gst/<hash>/ (see isMediaPath).
-var mediaPathPrefixes = []string{"/stream/", "/play/", "/playlist/", "/playlistall/"}
+var mediaPathPrefixes = []string{"/stream/", "/play/", "/subs/", "/playlist/", "/playlistall/"}
 
 // forceHTTPSHandler redirects every request to HTTPS. With httpMedia, media paths are
 // served with h instead, for players that can't use HTTPS. There are no exceptions by

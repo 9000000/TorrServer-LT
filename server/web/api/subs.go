@@ -52,6 +52,14 @@ func subsTracks(c *gin.Context) {
 		return
 	}
 
+	if notAuth {
+		if err := utils.TestLink(hash, false); err != nil {
+			c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+	}
+
 	spec, err := utils.ParseLink(hash)
 	if err != nil {
 		abortWithJSONError(c, http.StatusInternalServerError, err)
@@ -90,12 +98,12 @@ func subsTracks(c *gin.Context) {
 		return
 	}
 
-	// Video index: same rules as in play.go.
+	// Video index: explicit positive ID first, with single-file fallback.
 	videoID := -1
-	if len(tor.Files()) == 1 {
-		videoID = 1
-	} else if id, err := strconv.Atoi(indexStr); err == nil {
+	if id, err := strconv.Atoi(indexStr); err == nil && id > 0 {
 		videoID = id
+	} else if len(tor.Files()) == 1 {
+		videoID = 1
 	}
 	if videoID == -1 {
 		abortWithJSONError(c, http.StatusBadRequest, errors.New("file \"index\" is wrong"))
@@ -122,6 +130,10 @@ func subsTracks(c *gin.Context) {
 			video = &files[i]
 			break
 		}
+	}
+	if video == nil && len(files) == 1 && videoID == 1 {
+		video = &files[0]
+		videoID = video.Index
 	}
 	if video == nil {
 		abortWithJSONError(c, http.StatusNotFound, errors.New("video file not found"))

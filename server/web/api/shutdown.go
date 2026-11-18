@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	sets "server/settings"
@@ -20,8 +19,7 @@ import (
 // @Success		200
 // @Router			/shutdown [get]
 func shutdown(c *gin.Context) {
-	reasonStr := strings.ReplaceAll(c.Param("reason"), `/`, "")
-	if sets.ReadOnly && reasonStr == "" {
+	if sets.ReadOnly {
 		c.Status(http.StatusForbidden)
 		return
 	}

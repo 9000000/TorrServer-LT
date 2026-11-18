@@ -31,11 +31,23 @@ func newDiskPiece(p *Piece, savePath string) *DiskPiece {
 	// reports a sane initial size.
 	if fi, err := os.Stat(name); err == nil {
 		p.size = fi.Size()
-		if p.size >= p.cache.PieceLength {
+		if exp := p.expectedSize(); exp > 0 && p.size >= exp {
 			p.complete = true
 		}
 		p.accessed.Store(fi.ModTime().Unix())
 	}
+	return dp
+}
+
+func newDiskPieceFromStat(p *Piece, savePath string, size, modUnix int64) *DiskPiece {
+	dir := filepath.Join(savePath, hashHex(p.cache.InfoHash))
+	name := filepath.Join(dir, strconv.Itoa(p.Id))
+	dp := &DiskPiece{piece: p, dir: dir, name: name}
+	p.size = size
+	if exp := p.expectedSize(); exp > 0 && p.size >= exp {
+		p.complete = true
+	}
+	p.accessed.Store(modUnix)
 	return dp
 }
 
@@ -45,10 +57,19 @@ func (dp *DiskPiece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	dp.mu.Lock()
 	defer dp.mu.Unlock()
-	if err := os.MkdirAll(dp.dir, 0o777); err != nil {
-		return 0, err
+	if !dp.piece.cache.diskDirReady.Load() {
+		if err := os.MkdirAll(dp.dir, 0o777); err != nil {
+			return 0, err
+		}
+		dp.piece.cache.diskDirReady.Store(true)
 	}
 	f, err := os.OpenFile(dp.name, os.O_RDWR|os.O_CREATE, 0o666)
+	if err != nil && os.IsNotExist(err) {
+		if mkErr := os.MkdirAll(dp.dir, 0o777); mkErr != nil {
+			return 0, mkErr
+		}
+		f, err = os.OpenFile(dp.name, os.O_RDWR|os.O_CREATE, 0o666)
+	}
 	if err != nil {
 		return 0, err
 	}

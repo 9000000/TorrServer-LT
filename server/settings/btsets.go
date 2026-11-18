@@ -199,10 +199,25 @@ func BTsets() *BTSets { return btSets.Load() }
 // and by tests.
 func StoreBTsets(s *BTSets) { btSets.Store(s) }
 
+func cloneBTSets(src *BTSets) *BTSets {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	if len(src.TorznabUrls) > 0 {
+		cp.TorznabUrls = append([]TorznabConfig(nil), src.TorznabUrls...)
+	}
+	if len(src.TrustedProxies) > 0 {
+		cp.TrustedProxies = append([]string(nil), src.TrustedProxies...)
+	}
+	return &cp
+}
+
 func SetBTSets(sets *BTSets) {
-	if ReadOnly {
+	if ReadOnly || sets == nil {
 		return
 	}
+	sets = cloneBTSets(sets)
 	// failsafe checks (use defaults)
 	if sets.CacheSize == 0 {
 		sets.CacheSize = 64 * 1024 * 1024
@@ -235,14 +250,17 @@ func SetBTSets(sets *BTSets) {
 		sets.UseDisk = false
 	} else if sets.UseDisk {
 		StoreBTsets(sets)
-
-		go filepath.WalkDir(sets.TorrentsSavePath, func(path string, d fs.DirEntry, err error) error {
+		baseSnapshot := cloneBTSets(sets)
+		scanRoot := sets.TorrentsSavePath
+		go filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d.IsDir() && strings.ToLower(d.Name()) == ".tsc" {
-				sets.TorrentsSavePath = path
-				log.TLogln("Find directory \"" + sets.TorrentsSavePath + "\", use as cache dir")
+				updated := cloneBTSets(baseSnapshot)
+				updated.TorrentsSavePath = path
+				StoreBTsets(updated)
+				log.TLogln("Find directory \"" + path + "\", use as cache dir")
 				return io.EOF
 			}
 			if d.IsDir() && strings.HasPrefix(d.Name(), ".") {

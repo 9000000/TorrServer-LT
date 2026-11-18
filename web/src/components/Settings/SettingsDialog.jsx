@@ -45,8 +45,6 @@ export default function SettingsDialog({ handleClose }) {
   const [gstAvailable, setGstAvailable] = useState(false)
   const [wafDirty, setWAFDirty] = useState(false)
 
-  const tabMain = 0
-  const tabAdditional = 1
   const tabSearch = 2
   const tabApp = 3
   const tabAccess = 4

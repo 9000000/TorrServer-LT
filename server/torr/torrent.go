@@ -112,8 +112,32 @@ func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
 		return nil, errors.New("torr.NewTorrent: nil spec")
 	}
 
-	// Auto-save incoming trackers from torrent/magnet into trackers.txt (no duplicates)
-	if len(spec.Trackers) > 0 {
+	// Deep-copy spec so mutating Trackers/InfoBytes never races with shared DB
+	// or caller structs.
+	spec = spec.Clone()
+
+	// If metadata is known at add time (InfoBytes present), parse piece
+	// geometry, private-flag, and on-disk resume bits up-front.
+	var (
+		havePieces []byte
+		pieceCount int
+		totalSize  int64
+		isPrivate  bool
+	)
+	if len(spec.InfoBytes) > 0 {
+		if pt, err := lt.ParseTorrentBytes(spec.InfoBytes); err == nil {
+			isPrivate = pt.Private
+			if pt.HasMetadata && pt.NumPieces > 0 {
+				pieceCount = pt.NumPieces
+				totalSize = pt.TotalSize
+				havePieces = torrstor.ScanHavePieces(spec.InfoHash, pt.NumPieces, pt.PieceLength, pt.TotalSize)
+			}
+		}
+	}
+
+	// Auto-save incoming trackers from public torrents/magnets into trackers.txt.
+	// Private torrents are excluded so user passkeys never leak to trackers.txt.
+	if !isPrivate && len(spec.Trackers) > 0 {
 		var incoming []string
 		for _, tier := range spec.Trackers {
 			incoming = append(incoming, tier...)
@@ -124,33 +148,21 @@ func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
 	}
 
 	// Trackers: applied via session-level retrackers settings in addition
-	// to per-torrent. Mirror legacy RetrackersMode semantics.
-	defTrackers := utils.GetDefTrackers()
-	fileTrackers := utils.GetTrackerFromFile()
-	switch settings.BTsets().RetrackersMode {
-	case 1:
-		spec.Trackers = append(spec.Trackers, defTrackers)
-	case 2:
-		spec.Trackers = nil
-	case 3:
-		spec.Trackers = [][]string{defTrackers}
-	}
-	if len(fileTrackers) > 0 {
-		spec.Trackers = append(spec.Trackers, fileTrackers)
-	}
-
-	// If metadata is known at add time (InfoBytes present), scan the
-	// per-piece cache dir for resume bits. Without metadata we don't
-	// know the piece geometry yet; libtorrent will start downloading
-	// and we'll discover have-state on subsequent restarts.
-	var (
-		havePieces []byte
-		pieceCount int
-	)
-	if len(spec.InfoBytes) > 0 {
-		if pt, err := lt.ParseTorrentBytes(spec.InfoBytes); err == nil && pt.HasMetadata && pt.NumPieces > 0 {
-			pieceCount = pt.NumPieces
-			havePieces = torrstor.ScanHavePieces(spec.InfoHash, pt.NumPieces, pt.PieceLength)
+	// to per-torrent. Mirror legacy RetrackersMode semantics, except private
+	// torrents keep their announce list untouched per BEP-27.
+	if !isPrivate {
+		defTrackers := utils.GetDefTrackers()
+		fileTrackers := utils.GetTrackerFromFile()
+		switch settings.BTsets().RetrackersMode {
+		case 1:
+			spec.Trackers = append(spec.Trackers, defTrackers)
+		case 2:
+			spec.Trackers = nil
+		case 3:
+			spec.Trackers = [][]string{defTrackers}
+		}
+		if len(fileTrackers) > 0 {
+			spec.Trackers = append(spec.Trackers, fileTrackers)
 		}
 	}
 
@@ -164,7 +176,10 @@ func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
 	// shared lt torrent out from under an active stream.
 	bt.mu.Lock()
 	if existing := bt.torrents[spec.InfoHash]; existing != nil {
-		if existing.Stat != state.TorrentClosed {
+		existing.mu.Lock()
+		closed := existing.Stat == state.TorrentClosed
+		existing.mu.Unlock()
+		if !closed {
 			bt.mu.Unlock()
 			return existing, nil
 		}
@@ -185,17 +200,24 @@ func NewTorrent(spec *TorrentSpec, bt *BTServer) (*Torrent, error) {
 	}
 
 	lh, err := bt.session.AddTorrent(lt.AddTorrentParams{
-		Link:       magnetFromSpec(spec),
-		InfoBytes:  spec.InfoBytes,
-		Trackers:   spec.FlatTrackers(),
-		SavePath:   legacySavePath(spec.InfoHash),
-		Paused:     false,
-		HavePieces: havePieces,
-		PieceCount: pieceCount,
+		Link:                magnetFromSpec(spec),
+		InfoBytes:           spec.InfoBytes,
+		Trackers:            spec.FlatTrackers(),
+		SavePath:            legacySavePath(spec.InfoHash),
+		Paused:              false,
+		DefaultDontDownload: true,
+		HavePieces:          havePieces,
+		PieceCount:          pieceCount,
 	})
 	if err != nil {
 		bt.mu.Unlock()
 		return nil, err
+	}
+
+	if totalSize > 0 {
+		if c := torrstor.Global().CacheByHash([20]byte(spec.InfoHash)); c != nil {
+			c.SetTotalSize(totalSize)
+		}
 	}
 
 	timeout := torrentExpireTimeout()
@@ -294,16 +316,26 @@ func (t *Torrent) signalGotInfo() {
 		// Switch to lazy/streaming mode: download nothing until a Reader's
 		// window or Preload bumps the specific pieces it needs.
 		_ = lh.SetAllPiecesPriority(0)
+		if ts := lh.TotalSize(); ts > 0 {
+			if c := torrstor.Global().CacheByHash([20]byte(t.Hash())); c != nil {
+				c.SetTotalSize(ts)
+			}
+		}
 		// Backfill the spec with the just-received info-dict: a magnet-added
 		// torrent's spec has no InfoBytes, so without this every DB save stores
 		// the bare magnet and every server restart re-fetches metadata from the
 		// swarm (slow playlists / slow first play after restart).
-		if t.TorrentSpec != nil && len(t.TorrentSpec.InfoBytes) == 0 {
+		t.mu.Lock()
+		needInfo := t.TorrentSpec != nil && len(t.TorrentSpec.InfoBytes) == 0
+		t.mu.Unlock()
+		if needInfo {
 			if mb, err := lh.Metadata(); err == nil && len(mb) > 0 {
 				t.mu.Lock()
-				t.TorrentSpec.InfoBytes = mb
+				if t.TorrentSpec != nil && len(t.TorrentSpec.InfoBytes) == 0 {
+					t.TorrentSpec.InfoBytes = mb
+				}
 				t.mu.Unlock()
-				if pt, err := lt.ParseTorrentBytes(mb); err == nil && len(pt.Trackers) > 0 {
+				if pt, err := lt.ParseTorrentBytes(mb); err == nil && !pt.Private && len(pt.Trackers) > 0 {
 					utils.SaveTrackersToFile(pt.Trackers)
 				}
 			}
@@ -360,6 +392,14 @@ func (t *Torrent) GotInfo() bool {
 	case state.TorrentPreload:
 		t.mu.Unlock()
 		return true
+	case state.TorrentWorking:
+		if lh := t.handle(); lh != nil {
+			if have, _ := lh.HaveMetadata(); have {
+				t.mu.Unlock()
+				t.AddExpiredTime(torrentExpireTimeout())
+				return true
+			}
+		}
 	}
 	t.Stat = state.TorrentGettingInfo
 	t.mu.Unlock()
@@ -370,7 +410,9 @@ func (t *Torrent) GotInfo() bool {
 			t.mu.Unlock()
 			return false
 		}
-		t.Stat = state.TorrentWorking
+		if t.Stat == state.TorrentGettingInfo {
+			t.Stat = state.TorrentWorking
+		}
 		t.mu.Unlock()
 		t.AddExpiredTime(torrentExpireTimeout())
 		// Metadata (and so the release name) is now known — backfill a TMDB
@@ -570,11 +612,237 @@ func (t *Torrent) Files() []*File {
 // torrents.
 func (t *Torrent) LTHandle() *lt.Torrent { return t.handle() }
 
+var (
+	reTVSeasonEp      = regexp.MustCompile(`(?i)Season\W*(\d+).*\WEpisode\W*(\d+)`)
+	reTVSE            = regexp.MustCompile(`(?i)\bS(\d+)(?:[^0-9E]+)?E(\d+)\b`)
+	reTVX             = regexp.MustCompile(`(?i)\b(\d+)x(\d+)\b`)
+	reTVSeasonGen     = regexp.MustCompile(`(?i)\bS(?:eason)?\W*(\d+)`)
+	reTVSeasonRU      = regexp.MustCompile(`(?i)Сезон\W*(\d+)\b`)
+	reTVSeasonReverse = regexp.MustCompile(`(?i)(\d+)\W*(?:-[йяе]?\s+)?(?:Сезон|Season)`)
+	reTVEpGen         = regexp.MustCompile(`(?i)\bE(?:p|pisode)?\W*(\d+)\b`)
+	reTVEpLeading     = regexp.MustCompile(`^\s*(\d+)`)
+)
+
+func isVideoFileExt(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".mkv", ".mp4", ".avi", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".wmv", ".flv", ".ogv", ".vob", ".3gp":
+		return true
+	}
+	return false
+}
+
+func extractTVSeason(s string) int {
+	if m := reTVSeasonGen.FindStringSubmatch(s); len(m) == 2 {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	if m := reTVSeasonReverse.FindStringSubmatch(s); len(m) == 2 {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	if m := reTVSeasonRU.FindStringSubmatch(s); len(m) == 2 {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 0
+}
+
+func extractTVEpisode(s string) int {
+	if m := reTVEpGen.FindStringSubmatch(s); len(m) == 2 {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	if m := reTVEpLeading.FindStringSubmatch(s); len(m) == 2 {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 0
+}
+
+func buildFileStats(files []*File, category, title string) []*state.TorrentFileStat {
+	if len(files) == 0 {
+		return nil
+	}
+	files = append([]*File(nil), files...)
+	catLower := strings.ToLower(category)
+	isMovie := strings.Contains(catLower, "movie")
+
+	// Check for Smart Indexing (Movie Mode):
+	// Trigger if Category is explicitly "movie" OR if the largest file dominates
+	// the torrent (> 85% of total size), implying it's the main movie file.
+	if len(files) > 1 {
+		totalSize := int64(0)
+		maxSize := int64(0)
+		maxIndex := -1
+		for i, f := range files {
+			totalSize += f.Length
+			if f.Length > maxSize {
+				maxSize = f.Length
+				maxIndex = i
+			}
+		}
+		if !isMovie && totalSize > 0 && float64(maxSize) > float64(totalSize)*0.85 {
+			isMovie = true
+		}
+		if isMovie && maxIndex > 0 {
+			largest := files[maxIndex]
+			files = append(files[:maxIndex], files[maxIndex+1:]...)
+			files = append([]*File{largest}, files...)
+		}
+	}
+
+	// Smart Indexing (TV Series Mode) — exclude "anime" to keep default indexing.
+	if strings.Contains(catLower, "tv") && !strings.Contains(catLower, "anime") {
+		parseSeasonEp := func(inputStr string) (int, int) {
+			for _, re := range []*regexp.Regexp{reTVSeasonEp, reTVSE, reTVX} {
+				if matches := re.FindStringSubmatch(inputStr); len(matches) == 3 {
+					season, _ := strconv.Atoi(matches[1])
+					episode, _ := strconv.Atoi(matches[2])
+					if season > 0 && episode > 0 {
+						return season, episode
+					}
+				}
+			}
+			dir := filepath.Dir(inputStr)
+			base := filepath.Base(inputStr)
+			if ep := extractTVEpisode(base); ep > 0 {
+				season := extractTVSeason(dir)
+				if season == 0 {
+					season = extractTVSeason(category)
+				}
+				if season == 0 {
+					season = extractTVSeason(title)
+				}
+				if season > 0 {
+					return season, ep
+				}
+			}
+			return 0, 0
+		}
+
+		if len(files) == 1 {
+			f := files[0]
+			s, ep := parseSeasonEp(f.Path)
+			if s == 0 || ep == 0 {
+				s, ep = parseSeasonEp(title)
+			}
+			if s == 0 || ep == 0 {
+				s, ep = parseSeasonEp(category)
+			}
+			if s > 0 && ep > 0 {
+				mult := 100
+				if ep >= 1000 {
+					mult = 10000
+				} else if ep >= 100 {
+					mult = 1000
+				}
+				return []*state.TorrentFileStat{{
+					Id:     s*mult + ep,
+					Path:   f.Path,
+					Length: f.Length,
+				}}
+			}
+		} else {
+			type sePair struct{ s, ep int }
+			parsed := make([]sePair, len(files))
+			maxEp := 0
+			for i, f := range files {
+				s, ep := parseSeasonEp(f.Path)
+				parsed[i] = sePair{s: s, ep: ep}
+				if ep > maxEp {
+					maxEp = ep
+				}
+			}
+			mult := 100
+			if maxEp >= 1000 {
+				mult = 10000
+			} else if maxEp >= 100 {
+				mult = 1000
+			}
+
+			customIDs := make(map[int]*File)
+			customIdx := make(map[int]int)
+			usedIndices := make(map[int]bool)
+
+			for i, f := range files {
+				p := parsed[i]
+				if p.s <= 0 || p.ep <= 0 {
+					continue
+				}
+				id := p.s*mult + p.ep
+				existing, exists := customIDs[id]
+				if !exists {
+					customIDs[id] = f
+					customIdx[id] = i
+					usedIndices[i] = true
+					continue
+				}
+				// Prefer video containers over external subtitles/audio tracks,
+				// and larger files on ties; never drop the displaced file from
+				// FileStats so /subs external track discovery keeps seeing it.
+				fVid, exVid := isVideoFileExt(f.Path), isVideoFileExt(existing.Path)
+				if (fVid && !exVid) || (fVid == exVid && f.Length > existing.Length) {
+					usedIndices[customIdx[id]] = false
+					customIDs[id] = f
+					customIdx[id] = i
+					usedIndices[i] = true
+				}
+			}
+
+			if len(customIDs) > 0 {
+				out := make([]*state.TorrentFileStat, 0, len(files))
+				sortedIDs := make([]int, 0, len(customIDs))
+				for id := range customIDs {
+					sortedIDs = append(sortedIDs, id)
+				}
+				sort.Ints(sortedIDs)
+
+				for _, id := range sortedIDs {
+					f := customIDs[id]
+					out = append(out, &state.TorrentFileStat{
+						Id:     id,
+						Path:   f.Path,
+						Length: f.Length,
+					})
+				}
+
+				defaultID := 10000
+				if maxID := sortedIDs[len(sortedIDs)-1]; maxID >= defaultID {
+					defaultID = maxID + 1
+				}
+				for i, f := range files {
+					if !usedIndices[i] {
+						out = append(out, &state.TorrentFileStat{
+							Id:     defaultID,
+							Path:   f.Path,
+							Length: f.Length,
+						})
+						defaultID++
+					}
+				}
+				return out
+			}
+		}
+	}
+
+	out := make([]*state.TorrentFileStat, 0, len(files))
+	for i, f := range files {
+		id := f.Index + 1
+		if isMovie {
+			id = i + 1 // Main movie (files[0]) is always Id: 1
+		}
+		out = append(out, &state.TorrentFileStat{
+			Id:     id, // legacy: 0 means undefined in the web UI
+			Path:   f.Path,
+			Length: f.Length,
+		})
+	}
+	return out
+}
+
 // Status builds a state.TorrentStatus snapshot consumed by the web API.
 func (t *Torrent) Status() *state.TorrentStatus {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	st := new(state.TorrentStatus)
 	st.Stat = t.Stat
 	st.StatString = t.Stat.String()
@@ -586,18 +854,75 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.TorrentSize = t.Size
 	st.BitRate = t.BitRate
 	st.DurationSeconds = t.DurationSeconds
+	dlSpeed := t.DownloadSpeed
+	upSpeed := t.UploadSpeed
+	preloadedBytes := t.PreloadedBytes
+	preloadSize := t.PreloadSize
+	dirtiedGood := t.piecesDirtiedGood
+	dirtiedBad := t.piecesDirtiedBad
+	var specInfoBytes []byte
+	var specTrackers0 []string
 	if t.TorrentSpec != nil {
 		st.Hash = t.TorrentSpec.InfoHash.HexString()
+		specInfoBytes = t.TorrentSpec.InfoBytes
+		if len(t.TorrentSpec.Trackers) > 0 {
+			specTrackers0 = append([]string(nil), t.TorrentSpec.Trackers[0]...)
+		}
+	}
+	t.mu.Unlock()
+
+	populateTorrsHash := func() {
+		if len(st.FileStats) == 0 || st.Hash == "" {
+			return
+		}
+		th := torrshash.New(st.Hash)
+		th.AddField(torrshash.TagTitle, st.Title)
+		th.AddField(torrshash.TagPoster, st.Poster)
+		th.AddField(torrshash.TagCategory, st.Category)
+		th.AddField(torrshash.TagSize, strconv.FormatInt(st.TorrentSize, 10))
+		for _, tr := range specTrackers0 {
+			th.AddField(torrshash.TagTracker, tr)
+		}
+		if tok, err := torrshash.Pack(th); err == nil {
+			st.TorrsHash = tok
+		}
 	}
 
-	if t.handle() == nil {
+	lh := t.handle()
+	if lh == nil {
 		// DB-resident torrent (not in the session): recover the file list from
-		// the record's cached Data so playlists and the web file tree work
-		// without waking the torrent (= without a swarm metadata fetch).
-		st.FileStats = fileStatsFromData(t.Data)
+		// the record's cached Data, or fall back to InfoBytes when Data holds
+		// external client JSON (e.g. Lampa metadata) rather than tsFiles.
+		st.FileStats = fileStatsFromData(st.Data)
+		if len(st.FileStats) == 0 && len(specInfoBytes) > 0 {
+			if pt, err := lt.ParseTorrentBytes(specInfoBytes); err == nil && pt.HasMetadata && len(pt.Files) > 0 {
+				if st.TorrentSize == 0 && pt.TotalSize > 0 {
+					st.TorrentSize = pt.TotalSize
+				}
+				if st.Name == "" {
+					st.Name = pt.DisplayName
+				}
+				files := make([]*File, 0, len(pt.Files))
+				for i := range pt.Files {
+					f := pt.Files[i]
+					files = append(files, &File{
+						Index:  f.Index,
+						Path:   f.Path,
+						Length: f.Size,
+						Offset: f.Offset,
+					})
+				}
+				sort.Slice(files, func(i, j int) bool { return utils2.CompareStrings(files[i].Path, files[j].Path) })
+				st.FileStats = buildFileStats(files, st.Category, st.Title)
+			}
+		}
+		populateTorrsHash()
 		return st
 	}
-	lst, err := t.handle().Status()
+
+	// Query libtorrent outside t.mu so CGo round-trips never block GotInfo,
+	// Preload progress updates, or Close.
+	lst, err := lh.Status()
 	if err != nil {
 		return st
 	}
@@ -606,8 +931,8 @@ func (t *Torrent) Status() *state.TorrentStatus {
 		st.Hash = lst.InfoHash
 	}
 	st.LoadedSize = lst.TotalDone
-	st.DownloadSpeed = t.DownloadSpeed
-	st.UploadSpeed = t.UploadSpeed
+	st.DownloadSpeed = dlSpeed
+	st.UploadSpeed = upSpeed
 	st.TotalPeers = lst.ListPeers
 	st.PendingPeers = lst.ConnectCandidates
 	st.ActivePeers = lst.NumPeers
@@ -618,8 +943,8 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.BytesRead = lst.TotalDownload
 	st.BytesReadData = lst.TotalPayloadDownload
 	st.BytesReadUsefulData = lst.TotalPayloadDownload
-	st.PreloadedBytes = t.PreloadedBytes
-	st.PreloadSize = t.PreloadSize
+	st.PreloadedBytes = preloadedBytes
+	st.PreloadSize = preloadSize
 
 	// libtorrent doesn't surface chunk counters directly via
 	// torrent_status; approximate by dividing payload bytes by the
@@ -629,240 +954,18 @@ func (t *Torrent) Status() *state.TorrentStatus {
 	st.ChunksReadUseful = st.ChunksRead
 	st.ChunksReadWasted = (lst.TotalDownload - lst.TotalPayloadDownload) / chunkSize
 	st.ChunksWritten = lst.TotalPayloadUpload / chunkSize
-	st.PiecesDirtiedGood = t.piecesDirtiedGood
-	st.PiecesDirtiedBad = t.piecesDirtiedBad
+	st.PiecesDirtiedGood = dirtiedGood
+	st.PiecesDirtiedBad = dirtiedBad
 
 	if !lst.HasMetadata {
 		// Metadata still in flight — fall back to the DB-cached file list (if
 		// this torrent was ever saved) so the UI isn't blank meanwhile.
-		st.FileStats = fileStatsFromData(t.Data)
+		st.FileStats = fileStatsFromData(st.Data)
 	} else {
 		st.TorrentSize = lst.TotalSize
-		st.FileStats = nil
 		if files := t.Files(); len(files) > 0 {
-			catLower := strings.ToLower(st.Category)
-			isMovie := strings.Contains(catLower, "movie")
-
-			// Check for Smart Indexing (Movie Mode)
-			// Trigger if Category is explicitly "movie"
-			// OR if the largest file dominates the torrent (> 85% of total size), implying it's the main movie file.
-			if len(files) > 1 {
-				totalSize := int64(0)
-				maxSize := int64(0)
-				maxIndex := -1
-
-				for i, f := range files {
-					totalSize += f.Length
-					if f.Length > maxSize {
-						maxSize = f.Length
-						maxIndex = i
-					}
-				}
-
-				if !isMovie && totalSize > 0 {
-					// Heuristic: If largest file is > 85% of total size
-					if float64(maxSize) > float64(totalSize)*0.85 {
-						isMovie = true
-					}
-				}
-
-				if isMovie && maxIndex > 0 {
-					largest := files[maxIndex]
-					// remove from current position
-					files = append(files[:maxIndex], files[maxIndex+1:]...)
-					// prepend
-					files = append([]*File{largest}, files...)
-				}
-			}
-
-			// Smart Indexing (TV Series Mode)
-			// Exclude "anime" to keep default indexing as requested
-			if strings.Contains(catLower, "tv") && !strings.Contains(catLower, "anime") {
-				// Full matches
-				reSeasonEp := regexp.MustCompile(`(?i)Season\W*(\d+).*\WEpisode\W*(\d+)`)
-				reSE := regexp.MustCompile(`(?i)\bS(\d+)(?:[^0-9E]+)?E(\d+)\b`)
-				reX := regexp.MustCompile(`(?i)\b(\d+)x(\d+)\b`)
-
-				// Season extractors
-				reSeasonGen := regexp.MustCompile(`(?i)\bS(?:eason)?\W*(\d+)`)
-				reSeasonRU := regexp.MustCompile(`(?i)Сезон\W*(\d+)\b`)
-				reSeasonReverse := regexp.MustCompile(`(?i)(\d+)\W*(?:-[йяе]?\s+)?(?:Сезон|Season)`)
-
-				// Episode extractors
-				reEpGen := regexp.MustCompile(`(?i)\bE(?:p|pisode)?\W*(\d+)\b`)
-				reEpLeading := regexp.MustCompile(`^\s*(\d+)`)
-
-				extractSeason := func(s string) int {
-					if m := reSeasonGen.FindStringSubmatch(s); len(m) == 2 {
-						n, _ := strconv.Atoi(m[1])
-						return n
-					}
-					if m := reSeasonReverse.FindStringSubmatch(s); len(m) == 2 {
-						n, _ := strconv.Atoi(m[1])
-						return n
-					}
-					if m := reSeasonRU.FindStringSubmatch(s); len(m) == 2 {
-						n, _ := strconv.Atoi(m[1])
-						return n
-					}
-					return 0
-				}
-
-				extractEpisode := func(s string) int {
-					if m := reEpGen.FindStringSubmatch(s); len(m) == 2 {
-						n, _ := strconv.Atoi(m[1])
-						return n
-					}
-					if m := reEpLeading.FindStringSubmatch(s); len(m) == 2 {
-						n, _ := strconv.Atoi(m[1])
-						return n
-					}
-					return 0
-				}
-
-				parseID := func(inputStr string) int {
-					// 1. Try Full Path Pattern
-					matches := reSeasonEp.FindStringSubmatch(inputStr)
-					if len(matches) == 3 {
-						season, _ := strconv.Atoi(matches[1])
-						episode, _ := strconv.Atoi(matches[2])
-						if season > 0 && episode > 0 {
-							return season*100 + episode
-						}
-					}
-
-					matches = reSE.FindStringSubmatch(inputStr)
-					if len(matches) == 3 {
-						season, _ := strconv.Atoi(matches[1])
-						episode, _ := strconv.Atoi(matches[2])
-						if season > 0 && episode > 0 {
-							return season*100 + episode
-						}
-					}
-
-					matches = reX.FindStringSubmatch(inputStr)
-					if len(matches) == 3 {
-						season, _ := strconv.Atoi(matches[1])
-						episode, _ := strconv.Atoi(matches[2])
-						if season > 0 && episode > 0 {
-							return season*100 + episode
-						}
-					}
-
-					// 2. Split Component-based Strategy
-					dir := filepath.Dir(inputStr)
-					base := filepath.Base(inputStr)
-
-					ep := extractEpisode(base)
-					if ep > 0 {
-						season := extractSeason(dir)
-						if season == 0 {
-							season = extractSeason(st.Category)
-						}
-						if season == 0 {
-							season = extractSeason(t.Title)
-						}
-						if season > 0 {
-							return season*100 + ep
-						}
-					}
-
-					return 0
-				}
-
-				// Single File
-				if len(files) == 1 {
-					f := files[0]
-					id := parseID(f.Path)
-					if id == 0 {
-						id = parseID(t.Title)
-					}
-					if id == 0 {
-						id = parseID(st.Category)
-					}
-
-					if id > 0 {
-						st.FileStats = append(st.FileStats, &state.TorrentFileStat{
-							Id:     id,
-							Path:   f.Path,
-							Length: f.Length,
-						})
-						goto FinishStatus
-					}
-				} else {
-					// Multiple Files
-					customIDs := make(map[int]*File)
-					usedIndices := make(map[int]bool)
-
-					for i, f := range files {
-						id := parseID(f.Path)
-						if id > 0 {
-							customIDs[id] = f
-							usedIndices[i] = true
-						}
-					}
-
-					if len(customIDs) > 0 {
-						st.FileStats = make([]*state.TorrentFileStat, 0, len(files))
-
-						var sortedIDs []int
-						for id := range customIDs {
-							sortedIDs = append(sortedIDs, id)
-						}
-						sort.Ints(sortedIDs)
-
-						for _, id := range sortedIDs {
-							f := customIDs[id]
-							st.FileStats = append(st.FileStats, &state.TorrentFileStat{
-								Id:     id,
-								Path:   f.Path,
-								Length: f.Length,
-							})
-						}
-
-						defaultID := 10000
-						for i, f := range files {
-							if !usedIndices[i] {
-								st.FileStats = append(st.FileStats, &state.TorrentFileStat{
-									Id:     defaultID,
-									Path:   f.Path,
-									Length: f.Length,
-								})
-								defaultID++
-							}
-						}
-						goto FinishStatus
-					}
-				}
-			}
-
-			// Default Logic
-			for i, f := range files {
-				id := f.Index + 1
-				if isMovie {
-					id = i + 1 // Main movie (files[0]) is always Id: 1
-				}
-				st.FileStats = append(st.FileStats, &state.TorrentFileStat{
-					Id:     id, // legacy: 0 means undefined in the web UI
-					Path:   f.Path,
-					Length: f.Length,
-				})
-			}
-
-		FinishStatus:
-			th := torrshash.New(st.Hash)
-			th.AddField(torrshash.TagTitle, st.Title)
-			th.AddField(torrshash.TagPoster, st.Poster)
-			th.AddField(torrshash.TagCategory, st.Category)
-			th.AddField(torrshash.TagSize, strconv.FormatInt(st.TorrentSize, 10))
-			if t.TorrentSpec != nil && len(t.TorrentSpec.Trackers) > 0 {
-				for _, tr := range t.TorrentSpec.Trackers[0] {
-					th.AddField(torrshash.TagTracker, tr)
-				}
-			}
-			if tok, err := torrshash.Pack(th); err == nil {
-				st.TorrsHash = tok
-			}
+			st.FileStats = buildFileStats(files, st.Category, st.Title)
+			populateTorrsHash()
 		}
 	}
 	return st

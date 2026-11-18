@@ -8,7 +8,7 @@
 
 # Global build arguments (can be overridden via Docker Compose `build.args`)
 ARG LT_TAG=v2.1.2
-ARG GO_VERSION=1.27.0
+ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.20
 ARG TS_VERSION=MatriX.150.LT-1.2.8
 ARG TS_PORT=8090
@@ -69,6 +69,7 @@ COPY . .
 WORKDIR /src/server
 
 ENV CGO_ENABLED=1
+ENV CGO_CXXFLAGS="-DTSL_HAVE_LT_INTERNALS"
 
 # Gate the build on test suite execution (including ./gstreamer/)
 RUN go test -tags gst -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/ ./gstreamer/

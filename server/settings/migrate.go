@@ -218,15 +218,14 @@ func MigrateAll(source, target TorrServerDB, xpath string) (int, int, error) {
 
 		targetData := target.Get(xpath, name)
 		if targetData != nil {
-			// Check if already identical
-			if equal, err := isByteArraysEqualJson(sourceData, targetData); err == nil && equal {
-				skippedCount++
-				if IsDebug() {
-					log.TLogln(fmt.Sprintf("[%d/%d] Skipping %s/%s (already identical)",
-						i+1, len(names), xpath, name))
-				}
-				continue
+			// Never overwrite an existing target record (upstream 4e163a78):
+			// target may hold newer state (e.g. recently watched episodes).
+			skippedCount++
+			if IsDebug() {
+				log.TLogln(fmt.Sprintf("[%d/%d] Skipping %s/%s (already exists in target)",
+					i+1, len(names), xpath, name))
 			}
+			continue
 		}
 
 		// Perform migration

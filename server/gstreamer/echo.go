@@ -28,6 +28,9 @@ type componentStatus struct {
 }
 
 func (s *Service) echo(c *gin.Context) {
+	if !requireGstControlAuth(c) {
+		return
+	}
 	conf := s.currentConfig()
 	gstreamer := checkGStreamer(conf)
 	c.JSON(http.StatusOK, echoResponse{

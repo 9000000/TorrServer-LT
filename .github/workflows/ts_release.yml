@@ -4,10 +4,10 @@ name: Build and Release
 # workflows to produce the 8 TorrServer-LT binaries with the tag stamped in,
 # then publish them to a GitHub Release. Matches the names in release.json.
 
+# Tag pushes are handled by release.yml; keep this workflow manual-only so
+# pushing a tag does not launch two competing release pipelines.
 on:
-  push:
-    tags:
-      - "*"
+  workflow_dispatch:
 
 permissions:
   contents: write

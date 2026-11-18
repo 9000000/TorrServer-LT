@@ -5,7 +5,9 @@ import (
 	"encoding/base32"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,8 @@ import (
 	"server/log"
 	"server/settings"
 )
+
+const maxSavedTrackers = 200
 
 // trackersFetchTimeout bounds one remote trackers-list download. The fetch
 // runs in the background, but a blocked mirror must still give up quickly so
@@ -88,10 +92,102 @@ func GetTrackerFromFile() []string {
 	return ret
 }
 
-// SaveTrackersToFile saves new unique trackers from incoming torrents/magnets to trackers.txt.
-// It ensures no duplicates are written if the tracker is already in the file.
+var privateTrackerQueryKeys = map[string]struct{}{
+	"passkey":      {},
+	"authkey":      {},
+	"torrent_pass": {},
+	"uk":           {},
+	"pid":          {},
+	"apikey":       {},
+	"api_key":      {},
+	"key":          {},
+	"token":        {},
+	"secret":       {},
+	"uid":          {},
+	"hash":         {},
+}
+
+func looksLikeTokenSegment(seg string) bool {
+	if len(seg) < 16 {
+		return false
+	}
+	lower := strings.ToLower(seg)
+	if lower == "announce" || lower == "scrape" {
+		return false
+	}
+	hexOrToken := 0
+	for _, r := range lower {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r == '-' || r == '_':
+			hexOrToken++
+		default:
+			return false
+		}
+	}
+	// Pure hex >= 16 chars or opaque token >= 24 chars without dots is almost
+	// certainly a per-user tracker passkey embedded in the announce path.
+	isAllHex := true
+	for _, r := range lower {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			isAllHex = false
+			break
+		}
+	}
+	return isAllHex || len(seg) >= 24
+}
+
+// isPublicShareableTracker filters out private/passkey-bearing, local, or
+// credentialed announce URLs so user passkeys never leak into trackers.txt.
+func isPublicShareableTracker(tr string) bool {
+	u, err := url.Parse(tr)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || host == "localhost" ||
+		strings.HasSuffix(host, ".local") ||
+		strings.HasSuffix(host, ".onion") ||
+		strings.HasSuffix(host, ".i2p") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	if u.RawQuery != "" {
+		for k, vals := range u.Query() {
+			if _, bad := privateTrackerQueryKeys[strings.ToLower(k)]; bad {
+				return false
+			}
+			for _, v := range vals {
+				if looksLikeTokenSegment(v) {
+					return false
+				}
+			}
+		}
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if looksLikeTokenSegment(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// SaveTrackersToFile asynchronously saves new unique public trackers from
+// incoming torrents/magnets to trackers.txt without blocking NewTorrent or
+// the libtorrent alert pump.
 func SaveTrackersToFile(trackers []string) {
-	if len(trackers) == 0 {
+	if len(trackers) == 0 || settings.ReadOnly {
+		return
+	}
+	copied := append([]string(nil), trackers...)
+	go saveTrackersToFileSync(copied)
+}
+
+func saveTrackersToFileSync(trackers []string) {
+	if len(trackers) == 0 || settings.ReadOnly {
 		return
 	}
 
@@ -114,16 +210,23 @@ func SaveTrackersToFile(trackers []string) {
 		}
 	}
 
+	if len(seen) >= maxSavedTrackers {
+		return
+	}
+
 	var newTrackers []string
 	for _, raw := range trackers {
 		tr, ok := normalizeTracker(raw)
-		if !ok {
+		if !ok || !isPublicShareableTracker(tr) {
 			continue
 		}
 		lower := strings.ToLower(tr)
 		if !seen[lower] {
 			seen[lower] = true
 			newTrackers = append(newTrackers, tr)
+			if len(seen) >= maxSavedTrackers {
+				break
+			}
 		}
 	}
 

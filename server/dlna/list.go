@@ -2,6 +2,7 @@ package dlna
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"path/filepath"
 	"sort"
@@ -160,15 +161,16 @@ func getTorrentsByCategory(path string) (ret []interface{}) {
 	}
 
 	for _, t := range filtered {
+		st := t.Status()
 		obj := upnpav.Object{
-			ID:          "%2F" + t.TorrentSpec.InfoHash.HexString(),
+			ID:          "%2F" + t.Hash().HexString(),
 			ParentID:    parentID,
 			Restricted:  1,
-			Title:       strings.ReplaceAll(t.Title, "/", "|"),
+			Title:       strings.ReplaceAll(st.Title, "/", "|"),
 			Class:       "object.container.storageFolder",
-			Icon:        t.Poster,
-			AlbumArtURI: t.Poster,
-			Date:        upnpav.Timestamp{Time: time.Unix(t.Timestamp, 0)},
+			Icon:        st.Poster,
+			AlbumArtURI: st.Poster,
+			Date:        upnpav.Timestamp{Time: time.Unix(st.Timestamp, 0)},
 		}
 		cnt := upnpav.Container{Object: obj, ChildCount: 1}
 		ret = append(ret, cnt)
@@ -358,10 +360,10 @@ func getTorrentMeta(path, host string) (ret interface{}) {
 
 func loadTorrent(path, host string) (ret []interface{}) {
 	hash := filepath.Base(filepath.Dir(path))
-	if hash == "/" || hash == "\\" {
+	if hash == "/" || hash == "\\" || hash == "." {
 		hash = filepath.Base(path)
 	}
-	if len(hash) != 40 {
+	if _, ok := torr.ParseHash(hash); !ok {
 		return
 	}
 
@@ -370,18 +372,24 @@ func loadTorrent(path, host string) (ret []interface{}) {
 		log.TLogln("Dlna error get info from torrent", hash)
 		return
 	}
+	if tor.Stat == state.TorrentInDB {
+		tor = torr.LoadTorrent(tor)
+		if tor == nil {
+			return
+		}
+	}
 	if len(tor.Files()) == 0 {
-		time.Sleep(time.Millisecond * 200)
 		timeout := time.Now().Add(time.Second * 60)
-		for {
-			tor = torr.GetTorrent(hash)
-			if len(tor.Files()) > 0 {
-				break
-			}
-			time.Sleep(time.Millisecond * 200)
+		for len(tor.Files()) == 0 {
 			if time.Now().After(timeout) {
 				return
 			}
+			time.Sleep(time.Millisecond * 200)
+			next := torr.GetTorrent(hash)
+			if next == nil {
+				return
+			}
+			tor = next
 		}
 	}
 	parent := "%2F" + tor.Hash().HexString()
@@ -396,19 +404,21 @@ func loadTorrent(path, host string) (ret []interface{}) {
 }
 
 func getLink(host, path string) string {
-	if !strings.HasPrefix(host, "http") {
-		host = "http://" + host
-	}
-	pos := strings.LastIndex(host, ":")
-	if pos > 7 {
-		host = host[:pos]
+	raw := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(host), "http://"), "https://")
+	hostOnly := raw
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		hostOnly = h
+	} else {
+		hostOnly = strings.Trim(raw, "[]")
 	}
 	if !settings.PlainHTTPServesMedia() {
-		// --https-only, or --force-https without --http-media: link to HTTPS directly
-		return "https://" + strings.TrimPrefix(strings.TrimPrefix(host, "http://"), "https://") +
-			":" + settings.SslPort + "/" + path
+		sslPort := settings.SslPort
+		if sslPort == "" {
+			sslPort = settings.DefaultSslPort
+		}
+		return "https://" + net.JoinHostPort(hostOnly, sslPort) + "/" + path
 	}
-	return host + ":" + settings.Port + "/" + path
+	return "http://" + net.JoinHostPort(hostOnly, settings.Port) + "/" + path
 }
 
 func getObjFromTorrent(path, parent, host string, torr *torr.Torrent, file *state.TorrentFileStat) (ret interface{}) {

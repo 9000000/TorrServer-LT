@@ -477,7 +477,7 @@ killRunning() {
 #############################################
 
 getLatestRelease() {
-  curl -s "${REPO_API_URL}/releases/latest" |
+  curl -s --connect-timeout 10 --max-time 30 "${REPO_API_URL}/releases/latest" |
   grep -iE '"tag_name":|"version":' |
   sed -E 's/.*"([^"]+)".*/\1/' |
   head -n1
@@ -488,7 +488,7 @@ getSpecificRelease() {
   local tag_name
   tag_name=$(getVersionTag "$version")
   local response
-  response=$(curl -s "${REPO_API_URL}/releases/tags/$tag_name")
+  response=$(curl -s --connect-timeout 10 --max-time 30 "${REPO_API_URL}/releases/tags/$tag_name")
 
   if echo "$response" | grep -q '"tag_name"'; then
     echo "$tag_name"
@@ -517,7 +517,7 @@ downloadBinary() {
   local destination="$2"
   local version_info="$3"
 
-  local curl_args=(-L)
+  local curl_args=(-L --fail)
 
   if [[ $SILENT_MODE -eq 0 ]]; then
     echo " - $(msg downloading) $version_info..."
@@ -526,9 +526,14 @@ downloadBinary() {
     curl_args+=(-s -S)
   fi
 
-  curl "${curl_args[@]}" -o "$destination" "$url"
-  chmod +x "$destination"
-  xattr -r -d com.apple.quarantine "$destination" 2>/dev/null || true
+  local tmp="${destination}.download"
+  if ! curl "${curl_args[@]}" -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$tmp"
+  xattr -r -d com.apple.quarantine "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$destination"
 }
 
 #############################################
@@ -768,7 +773,12 @@ configureService() {
       if [[ $SILENT_MODE -eq 0 ]]; then
         printf ' %s\n' "$(msg store_auth "$isAuthUser" "$isAuthPass" "${dirInstall}/accs.db")"
       fi
-      echo -e "{\n  \"$isAuthUser\": \"$isAuthPass\"\n}" > "$dirInstall/accs.db"
+      local esc_user="${isAuthUser//\\/\\\\}"
+      esc_user="${esc_user//\"/\\\"}"
+      local esc_pass="${isAuthPass//\\/\\\\}"
+      esc_pass="${esc_pass//\"/\\\"}"
+      (umask 077 && printf '{\n  "%s": "%s"\n}\n' "$esc_user" "$esc_pass" > "$dirInstall/accs.db")
+      chmod 600 "$dirInstall/accs.db"
     else
       local auth
       auth=$(cat "$dirInstall/accs.db" | head -2 | tail -1 | tr -d '[:space:]' | tr -d '"')
@@ -781,7 +791,12 @@ configureService() {
           if [[ $SILENT_MODE -eq 0 ]]; then
             printf ' %s\n' "$(msg store_auth "$isAuthUser" "$isAuthPass" "${dirInstall}/accs.db")"
           fi
-          echo -e "{\n  \"$isAuthUser\": \"$isAuthPass\"\n}" > "$dirInstall/accs.db"
+          local esc_user="${isAuthUser//\\/\\\\}"
+          esc_user="${esc_user//\"/\\\"}"
+          local esc_pass="${isAuthPass//\\/\\\\}"
+          esc_pass="${esc_pass//\"/\\\"}"
+          (umask 077 && printf '{\n  "%s": "%s"\n}\n' "$esc_user" "$esc_pass" > "$dirInstall/accs.db")
+          chmod 600 "$dirInstall/accs.db"
         fi
       fi
     fi

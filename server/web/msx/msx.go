@@ -1,13 +1,19 @@
 package msx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"server/settings"
 	"server/torr"
@@ -20,7 +26,53 @@ import (
 
 const base, files = "tsmsx.yourok.ru", "media"
 
-var param = "menu:request:interaction:{SERVER}@{PREFIX}" + base + "/start.html"
+var (
+	paramMu sync.RWMutex
+	param   = "menu:request:interaction:{SERVER}@{PREFIX}" + base + "/start.html"
+)
+
+func isBlockedProxyIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
+}
+
+var msxHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			var publicIP string
+			for _, ipAddr := range ips {
+				if isBlockedProxyIP(ipAddr.IP) {
+					return nil, fmt.Errorf("msx proxy: blocked internal address %s", ipAddr.IP.String())
+				}
+				if publicIP == "" {
+					publicIP = ipAddr.IP.String()
+				}
+			}
+			if publicIP == "" {
+				return nil, errors.New("msx proxy: no public address resolved")
+			}
+			var dialer net.Dialer
+			dialer.Timeout = 10 * time.Second
+			return dialer.DialContext(ctx, network, net.JoinHostPort(publicIP, port))
+		},
+	},
+}
 
 func trn(h string) (st, sc string) {
 	if h := torr.GetTorrent(h); h != nil {
@@ -52,14 +104,17 @@ func SetupRoute(r gin.IRouter) {
 	authorized := r.Group("/", auth.CheckAuth())
 	// MSX:
 	authorized.GET("/msx/", func(c *gin.Context) {
-		r, e := http.Get("http://" + base)
+		r, e := msxHTTPClient.Get("http://" + base)
 		rsp(c, r, e)
 	})
 	authorized.GET("/msx/start.json", func(c *gin.Context) {
+		paramMu.RLock()
+		curParam := param
+		paramMu.RUnlock()
 		c.JSON(http.StatusOK, map[string]any{
 			"name":      "TorrServer",
 			"version":   version.Version,
-			"parameter": param,
+			"parameter": curParam,
 			"launcher": map[string]any{
 				"type":  "start",
 				"image": utils.GetScheme(c) + "://" + c.Request.Host + "/logo.png",
@@ -67,18 +122,23 @@ func SetupRoute(r gin.IRouter) {
 		})
 	})
 	authorized.POST("/msx/start.json", func(c *gin.Context) {
-		if e := c.BindJSON(&param); e != nil {
-			c.AbortWithError(http.StatusBadRequest, e)
+		if settings.ReadOnly {
+			c.Status(http.StatusForbidden)
+			return
 		}
+		var next string
+		if e := c.BindJSON(&next); e != nil {
+			c.AbortWithError(http.StatusBadRequest, e)
+			return
+		}
+		paramMu.Lock()
+		param = next
+		paramMu.Unlock()
 	})
 	authorized.GET("/msx/trn", func(c *gin.Context) {
 		r := false
-		if h := c.Query("hash"); h != "" {
-			for _, t := range settings.ListTorrent() {
-				if r = (t != nil && t.TorrentSpec != nil && t.TorrentSpec.InfoHash == h); r {
-					break
-				}
-			}
+		if h := strings.ToLower(strings.TrimSpace(c.Query("hash"))); h != "" {
+			r = settings.GetTorrent(h) != nil
 		}
 		c.JSON(http.StatusOK, r)
 	})
@@ -117,63 +177,67 @@ func SetupRoute(r gin.IRouter) {
 		c.JSON(http.StatusOK, &r)
 	})
 	authorized.Any("/msx/proxy", func(c *gin.Context) {
-		if u := c.Query("url"); u == "" {
+		u := strings.TrimSpace(c.Query("url"))
+		if u == "" {
 			c.AbortWithStatus(http.StatusBadRequest)
-		} else if q, e := http.NewRequest(c.Request.Method, u, c.Request.Body); e != nil {
-			c.AbortWithError(http.StatusInternalServerError, e)
-		} else {
-			for _, v := range c.QueryArray("header") {
-				if v := strings.SplitN(v, ":", 2); len(v) == 2 {
-					q.Header.Add(v[0], v[1])
-				}
-			}
-			r, e := http.DefaultClient.Do(q)
-			rsp(c, r, e)
+			return
 		}
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid proxy url"})
+			return
+		}
+		q, e := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, parsed.String(), c.Request.Body)
+		if e != nil {
+			c.AbortWithError(http.StatusInternalServerError, e)
+			return
+		}
+		for _, v := range c.QueryArray("header") {
+			if kv := strings.SplitN(v, ":", 2); len(kv) == 2 {
+				q.Header.Add(strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1]))
+			}
+		}
+		r, e := msxHTTPClient.Do(q)
+		rsp(c, r, e)
 	})
 	authorized.GET("/msx/imdb/:id", func(c *gin.Context) {
 		i, j := strings.TrimPrefix(c.Param("id"), "/"), false
+		if strings.Contains(i, "/") || strings.Contains(i, "..") {
+			c.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
 		if j = strings.HasSuffix(i, ".json"); !j {
 			i += ".json"
 		}
-		if r, e := http.Get("https://v2.sg.media-imdb.com/suggestion/h/" + i); e != nil || r.StatusCode != http.StatusOK || j {
+		if r, e := msxHTTPClient.Get("https://v2.sg.media-imdb.com/suggestion/h/" + url.PathEscape(i)); e != nil || r.StatusCode != http.StatusOK || j {
 			rsp(c, r, e)
 		} else {
-			var j struct {
+			defer r.Body.Close()
+			var payload struct {
 				D []struct{ I struct{ ImageUrl string } }
 			}
-			if e = json.NewDecoder(r.Body).Decode(&j); e != nil {
+			if e = json.NewDecoder(r.Body).Decode(&payload); e != nil {
 				c.AbortWithError(http.StatusInternalServerError, e)
-			} else if len(j.D) == 0 || j.D[0].I.ImageUrl == "" {
+			} else if len(payload.D) == 0 || payload.D[0].I.ImageUrl == "" {
 				c.Status(http.StatusNotFound)
 			} else {
-				c.Redirect(http.StatusMovedPermanently, j.D[0].I.ImageUrl)
+				c.Redirect(http.StatusMovedPermanently, payload.D[0].I.ImageUrl)
 			}
 		}
 	})
-	// Files:
-	authorized.StaticFS("/files/", gin.Dir(filepath.Join(settings.Path, files), true))
+	// Files: serve static directory inside settings.Path/media only; arbitrary
+	// symlink creation over HTTP is disabled to prevent host filesystem exposure.
+	authorized.StaticFS("/files/", gin.Dir(filepath.Join(settings.Path, files), false))
 	authorized.GET("/files", func(c *gin.Context) {
 		if l, e := os.Readlink(filepath.Join(settings.Path, files)); e == nil || os.IsNotExist(e) {
 			c.JSON(http.StatusOK, l)
 		} else {
-			c.JSON(http.StatusInternalServerError, e.Error)
+			c.JSON(http.StatusInternalServerError, e.Error())
 		}
 	})
 	authorized.POST("/files", func(c *gin.Context) {
-		var l string
-		if e := c.BindJSON(&l); e != nil {
-			c.AbortWithError(http.StatusBadRequest, e)
-		} else if e = os.Remove(filepath.Join(settings.Path, files)); e != nil && !os.IsNotExist(e) {
-			c.AbortWithError(http.StatusInternalServerError, e)
-		} else if l != "" {
-			if f, e := os.Stat(l); e != nil {
-				c.AbortWithError(http.StatusBadRequest, e)
-			} else if !f.IsDir() {
-				c.AbortWithError(http.StatusBadRequest, errors.New(l+" is not a directory"))
-			} else if e = os.Symlink(l, filepath.Join(settings.Path, files)); e != nil {
-				c.AbortWithError(http.StatusInternalServerError, e)
-			}
-		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error": "modifying host filesystem symlinks via HTTP is disabled",
+		})
 	})
 }

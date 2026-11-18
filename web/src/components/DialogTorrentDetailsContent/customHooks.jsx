@@ -16,17 +16,24 @@ export const useUpdateCache = hash => {
   )
 
   useEffect(() => {
-    if (hash) {
-      timerID.current = setInterval(() => {
-        const updateCache = newCache => componentIsMounted.current && setCache(newCache)
-
-        axios
-          .post(cacheHost(), { action: 'get', hash })
-          .then(({ data }) => updateCache(data))
-          // empty cache if error
-          .catch(() => updateCache({}))
-      }, 100)
-    } else clearInterval(timerID.current)
+    if (!hash) {
+      clearInterval(timerID.current)
+      return undefined
+    }
+    let inFlight = false
+    const updateCache = newCache => componentIsMounted.current && setCache(newCache)
+    timerID.current = setInterval(() => {
+      if (inFlight) return
+      inFlight = true
+      axios
+        .post(cacheHost(), { action: 'get', hash })
+        .then(({ data }) => updateCache(data))
+        // empty cache if error
+        .catch(() => updateCache({}))
+        .finally(() => {
+          inFlight = false
+        })
+    }, 100)
 
     return () => clearInterval(timerID.current)
   }, [hash])
@@ -60,11 +67,20 @@ export const useCreateCacheMap = cache => {
   return cacheMap
 }
 
-export const useGetSettings = cache => {
+export const useGetSettings = () => {
   const [settings, setSettings] = useState()
   useEffect(() => {
-    axios.post(settingsHost(), { action: 'get' }).then(({ data }) => setSettings(data))
-  }, [cache])
+    let active = true
+    axios
+      .post(settingsHost(), { action: 'get' })
+      .then(({ data }) => {
+        if (active) setSettings(data)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [])
 
   return settings
 }

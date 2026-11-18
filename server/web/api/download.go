@@ -1,7 +1,7 @@
 package api
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,7 +13,6 @@ import (
 type fileReader struct {
 	pos  int64
 	size int64
-	io.ReadSeeker
 }
 
 func newFR(size int64) *fileReader {
@@ -24,19 +23,34 @@ func newFR(size int64) *fileReader {
 }
 
 func (f *fileReader) Read(p []byte) (n int, err error) {
-	f.pos = f.pos + int64(len(p))
+	if f.pos >= f.size {
+		return 0, io.EOF
+	}
+	rem := f.size - f.pos
+	if int64(len(p)) > rem {
+		p = p[:int(rem)]
+	}
+	clear(p)
+	f.pos += int64(len(p))
 	return len(p), nil
 }
 
 func (f *fileReader) Seek(offset int64, whence int) (int64, error) {
+	var next int64
 	switch whence {
-	case 0:
-		f.pos = offset
-	case 1:
-		f.pos += offset
-	case 2:
-		f.pos = f.size + offset
+	case io.SeekStart:
+		next = offset
+	case io.SeekCurrent:
+		next = f.pos + offset
+	case io.SeekEnd:
+		next = f.size + offset
+	default:
+		return 0, errors.New("invalid whence")
 	}
+	if next < 0 {
+		return 0, errors.New("negative seek position")
+	}
+	f.pos = next
 	return f.pos, nil
 }
 
@@ -55,10 +69,10 @@ func (f *fileReader) Seek(offset int64, whence int) (int64, error) {
 func download(c *gin.Context) {
 	szStr := c.Param("size")
 	sz, err := strconv.Atoi(szStr)
-	if err != nil {
-		c.Error(err)
+	if err != nil || sz <= 0 || sz > 10240 {
+		abortWithJSONError(c, http.StatusBadRequest, errors.New("size must be between 1 and 10240 MB"))
 		return
 	}
 
-	http.ServeContent(c.Writer, c.Request, fmt.Sprintln(szStr)+"mb.bin", time.Now(), newFR(int64(sz*1024*1024)))
+	http.ServeContent(c.Writer, c.Request, strconv.Itoa(sz)+"mb.bin", time.Now(), newFR(int64(sz)*1024*1024))
 }

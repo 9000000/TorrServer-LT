@@ -178,13 +178,14 @@ func stream(c *gin.Context) {
 		c.Status(200) // only set status, not return
 	}
 
-	// find file
+	// Explicit positive file index always wins; fall back to movie/single-file
+	// default only when indexStr is empty or non-positive.
 	index := -1
 	catLower := strings.ToLower(tor.Category)
-	if strings.Contains(catLower, "movie") || strings.Contains(strings.ToLower(category), "movie") {
-		index = 1
-	} else if ind, err := strconv.Atoi(indexStr); err == nil {
+	if ind, err := strconv.Atoi(indexStr); err == nil && ind > 0 {
 		index = ind
+	} else if strings.Contains(catLower, "movie") || strings.Contains(strings.ToLower(category), "movie") {
+		index = 1
 	} else if len(tor.Files()) == 1 {
 		if st := tor.Status(); len(st.FileStats) == 1 {
 			index = st.FileStats[0].Id
@@ -367,13 +368,14 @@ func streamNoAuth(c *gin.Context) {
 		return
 	}
 
-	// find file
+	// Explicit positive file index always wins; fall back to movie/single-file
+	// default only when indexStr is empty or non-positive.
 	index := -1
 	catLower := strings.ToLower(tor.Category)
-	if strings.Contains(catLower, "movie") || strings.Contains(strings.ToLower(category), "movie") {
-		index = 1
-	} else if ind, err := strconv.Atoi(indexStr); err == nil {
+	if ind, err := strconv.Atoi(indexStr); err == nil && ind > 0 {
 		index = ind
+	} else if strings.Contains(catLower, "movie") || strings.Contains(strings.ToLower(category), "movie") {
+		index = 1
 	} else if len(tor.Files()) == 1 {
 		if st := tor.Status(); len(st.FileStats) == 1 {
 			index = st.FileStats[0].Id

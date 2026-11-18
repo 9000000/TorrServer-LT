@@ -50,7 +50,7 @@ func Init(path, webpath string) {
 	}
 
 	if webpath != "" {
-		ff, err := os.OpenFile(webpath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
+		ff, err := os.OpenFile(webpath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error create web log file: %v\n", err)
 		} else {
@@ -76,7 +76,7 @@ func openLogFile(path string) (*os.File, error) {
 			os.Remove(path)
 		}
 	}
-	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
+	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 }
 
 func applyServerLog(ff *os.File) {
@@ -114,6 +114,24 @@ func WebLogln(v ...interface{}) {
 	}
 }
 
+const maxLoggedBodyBytes = 4096
+
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func isSensitiveLogPath(p string) bool {
+	return p == "/settings" ||
+		strings.HasPrefix(p, "/ssl") ||
+		strings.HasPrefix(p, "/waf") ||
+		p == "/gst/settings"
+}
+
+func sanitizeLogField(s string) string {
+	return strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(s)
+}
+
 func WebLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if webLog == nil {
@@ -121,24 +139,36 @@ func WebLogger() gin.HandlerFunc {
 			return
 		}
 		body := ""
-		// save body if not form or file
-		if !strings.HasPrefix(c.Request.Header.Get("Content-Type"), "multipart/form-data") {
-			bodyBytes, _ := io.ReadAll(c.Request.Body)
-			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			body = string(bodyBytes)
-		} else {
+		reqPath := c.Request.URL.Path
+		if isSensitiveLogPath(reqPath) {
+			body = "[redacted]"
+		} else if strings.HasPrefix(c.Request.Header.Get("Content-Type"), "multipart/form-data") {
 			body = "body hidden, too large"
+		} else if c.Request.Body != nil {
+			// Peek at most 4 KiB so large uploads never buffer in RAM, while
+			// preserving the full unread stream for downstream handlers.
+			peek, _ := io.ReadAll(io.LimitReader(c.Request.Body, maxLoggedBodyBytes+1))
+			c.Request.Body = readCloser{
+				Reader: io.MultiReader(bytes.NewReader(peek), c.Request.Body),
+				Closer: c.Request.Body,
+			}
+			if len(peek) > maxLoggedBodyBytes {
+				body = sanitizeLogField(string(peek[:maxLoggedBodyBytes])) + "...(truncated)"
+			} else {
+				body = sanitizeLogField(string(peek))
+			}
 		}
 		c.Next()
 
 		statusCode := c.Writer.Status()
-		clientIP := c.ClientIP()
-		method := c.Request.Method
-		path := c.Request.URL.Path
+		clientIP := sanitizeLogField(c.ClientIP())
+		method := sanitizeLogField(c.Request.Method)
+		path := reqPath
 		raw := c.Request.URL.RawQuery
 		if raw != "" {
 			path = path + "?" + raw
 		}
+		path = sanitizeLogField(path)
 
 		logStr := fmt.Sprintf("%3d | %12s | %-7s %#v %v",
 			statusCode,

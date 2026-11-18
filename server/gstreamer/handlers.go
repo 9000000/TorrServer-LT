@@ -13,8 +13,35 @@ import (
 	"strings"
 	"time"
 
+	"server/settings"
+	"server/torr"
+
 	"github.com/gin-gonic/gin"
 )
+
+func requireGstControlAuth(c *gin.Context) bool {
+	if c.GetBool("auth_required") && c.GetString(gin.AuthUserKey) == "" {
+		c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func requireGstStreamAccess(c *gin.Context, rawHash string) bool {
+	if !(c.GetBool("auth_required") && c.GetString(gin.AuthUserKey) == "") {
+		return true
+	}
+	if settings.StreamWA {
+		return true
+	}
+	if torr.GetTorrentInfo(HashOfTaskID(rawHash)) != nil {
+		return true
+	}
+	c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
+	c.AbortWithStatus(http.StatusUnauthorized)
+	return false
+}
 
 func (s *Service) SetupRoute(route gin.IRouter) {
 	route.GET("/gst/remove", s.remove)
@@ -29,6 +56,9 @@ func (s *Service) SetupRoute(route gin.IRouter) {
 }
 
 func (s *Service) remove(c *gin.Context) {
+	if !requireGstControlAuth(c) {
+		return
+	}
 	id := firstNonEmpty(c.Query("hash"), c.Query("id"))
 	if id == "" {
 		c.AbortWithError(http.StatusBadRequest, ErrInvalidIdentifier)
@@ -49,6 +79,9 @@ func (s *Service) remove(c *gin.Context) {
 
 func (s *Service) heartbeat(c *gin.Context) {
 	id := c.Param("hash")
+	if sid := c.Query("sid"); sid != "" && !strings.Contains(id, sessionSeparator) {
+		id = taskIDFor(id, sid)
+	}
 	task := s.Get(id)
 	if task == nil && !strings.Contains(id, sessionSeparator) {
 		task = s.GetAnyForHash(id) // clients that poll torrent stats use the bare torrent hash
@@ -65,6 +98,9 @@ func (s *Service) probe(c *gin.Context) {
 	noCache(c)
 
 	hash := c.Param("hash")
+	if !requireGstStreamAccess(c, hash) {
+		return
+	}
 	fileID := firstNonEmpty(c.Query("index"), c.Query("id"), c.Query("fileID"))
 	if fileID == "" {
 		c.AbortWithError(http.StatusBadRequest, ErrBadSource)
@@ -85,6 +121,9 @@ func (s *Service) master(c *gin.Context) {
 	noCache(c)
 
 	hash := c.Param("hash")
+	if !requireGstStreamAccess(c, hash) {
+		return
+	}
 	fileID := firstNonEmpty(c.Query("index"), c.Query("id"), c.Query("fileID"))
 	// -1 = no explicit track pick (playlist links carry no ?audio=): the
 	// AudioLang preference — or the container's first track — decides in

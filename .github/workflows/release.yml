@@ -115,7 +115,12 @@ jobs:
 
   release:
     needs: [matrix-prep, cross, macos]
-    if: always() && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    if: >-
+      !cancelled() &&
+      needs.matrix-prep.result == 'success' &&
+      (needs.cross.result == 'success' || needs.cross.result == 'skipped') &&
+      (needs.macos.result == 'success' || needs.macos.result == 'skipped') &&
+      (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - name: Download binary artifacts

@@ -3,9 +3,11 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"server/ffprobe"
 	sets "server/settings"
+	"server/torr"
 
 	"github.com/gin-gonic/gin"
 )
@@ -51,6 +53,17 @@ func ffp(c *gin.Context) {
 		return
 	}
 
+	parsedHash, ok := torr.ParseHash(hash)
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid torrent hash"})
+		return
+	}
+	index, err := strconv.Atoi(indexStr)
+	if err != nil || index <= 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid file index"})
+		return
+	}
+
 	if !ffprobe.Exists() {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "ffprobe binary not found"})
 		return
@@ -58,7 +71,7 @@ func ffp(c *gin.Context) {
 
 	// The internal loopback listener: never redirected by --force-https and
 	// still there with --https-only.
-	link := sets.LoopbackBaseURL() + "/play/" + hash + "/" + indexStr
+	link := sets.LoopbackBaseURL() + "/play/" + parsedHash.HexString() + "/" + strconv.Itoa(index) + "?stat=ffprobe"
 
 	data, err := ffprobe.ProbeUrl(link)
 	if err != nil {

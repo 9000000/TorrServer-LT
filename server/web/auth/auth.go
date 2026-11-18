@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -49,12 +50,16 @@ func (a authPairs) searchCredential(authValue string) (string, bool) {
 	if authValue == "" {
 		return "", false
 	}
+	authBytes := []byte(authValue)
+	var matchedUser string
+	matched := 0
 	for _, pair := range a {
-		if pair.value == authValue {
-			return pair.user, true
+		if subtle.ConstantTimeCompare([]byte(pair.value), authBytes) == 1 {
+			matchedUser = pair.user
+			matched = 1
 		}
 	}
-	return "", false
+	return matchedUser, matched == 1
 }
 
 func BasicAuth(accounts gin.Accounts) gin.HandlerFunc {

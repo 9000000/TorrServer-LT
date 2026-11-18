@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,25 +47,24 @@ func allPlayList(c *gin.Context) {
 	category := c.Query("category")
 	search := c.Query("search")
 
-	if category != "" || search != "" {
-		var filtered []*torr.Torrent
-		for _, tr := range torrs {
-			st := tr.Status()
-
-			if category == "uncategorized" {
-				if st.Category != "" {
-					continue
-				}
-			} else if category != "" && st.Category != category {
-				continue
-			}
-			if search != "" &&
-				!strings.Contains(strings.ToLower(st.Title), strings.ToLower(search)) {
-				continue
-			}
-			filtered = append(filtered, tr)
+	statuses := make([]*state.TorrentStatus, 0, len(torrs))
+	for _, tr := range torrs {
+		st := tr.Status()
+		if st == nil {
+			continue
 		}
-		torrs = filtered
+		if category == "uncategorized" {
+			if st.Category != "" {
+				continue
+			}
+		} else if category != "" && st.Category != category {
+			continue
+		}
+		if search != "" &&
+			!strings.Contains(strings.ToLower(st.Title), strings.ToLower(search)) {
+			continue
+		}
+		statuses = append(statuses, st)
 	}
 
 	host := mediaBaseURL(c)
@@ -72,24 +72,22 @@ func allPlayList(c *gin.Context) {
 	hash := ""
 	// fn=file.m3u fix forkplayer bug with end .m3u in link
 	merge := sets.BTsets() != nil && sets.BTsets().MergeAllM3U
-	for _, tr := range torrs {
-		hash += tr.Hash().HexString()
+	for _, st := range statuses {
+		hash += st.Hash
 		// MergeAllM3U lists every file inline instead of one nested playlist per
 		// torrent. Status serves a DB-resident torrent's file list from its
-		// cached record, so this never wakes torrents; one whose files were
-		// never fetched keeps its nested-playlist entry.
-		if merge {
-			if st := tr.Status(); len(st.FileStats) > 0 {
-				list += getM3uList(st, host, false, "")
-				continue
-			}
+		// cached record or InfoBytes, so this never wakes torrents; one whose
+		// files were never fetched keeps its nested-playlist entry.
+		if merge && len(st.FileStats) > 0 {
+			list += getM3uList(st, host, false, "")
+			continue
 		}
 		list += "#EXTINF:0"
-		if tr.Poster != "" {
-			list += " tvg-logo=\"" + tr.Poster + "\""
+		if st.Poster != "" {
+			list += " tvg-logo=\"" + st.Poster + "\""
 		}
-		list += " type=\"playlist\"," + tr.Title + "\n"
-		list += host + "/stream/" + url.PathEscape(tr.Title) + ".m3u?link=" + tr.TorrentSpec.InfoHash.HexString() + "&m3u&fn=file.m3u\n"
+		list += " type=\"playlist\"," + st.Title + "\n"
+		list += host + "/stream/" + url.PathEscape(st.Title) + ".m3u?link=" + st.Hash + "&m3u&fn=file.m3u\n"
 	}
 
 	sendM3U(c, "all.m3u", hash, list)
@@ -150,19 +148,33 @@ func playList(c *gin.Context) {
 	sendM3U(c, name, tor.Hash().HexString(), list)
 }
 
+var sessionTokenParamRe = regexp.MustCompile(`&ss=[0-9a-f]{1,32}`)
+
+func sanitizeDispositionFilename(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+}
+
 func sendM3U(c *gin.Context, name, hash string, m3u string) {
 	c.Header("Content-Type", "audio/x-mpegurl")
 	c.Header("Connection", "close")
-	if hash != "" {
-		// The list changes with titles, viewed files and settings, so the tag covers the body.
-		sum := sha1.Sum([]byte(hash + "/" + name + "\n" + m3u))
-		c.Header("ETag", httptoo.EncodeQuotedString(hex.EncodeToString(sum[:])))
-	}
 	if name == "" {
 		name = "playlist.m3u"
 	}
-	c.Header("Content-Disposition", `attachment; filename="`+name+`"`)
-	http.ServeContent(c.Writer, c.Request, name, time.Now(), bytes.NewReader([]byte(m3u)))
+	safeName := sanitizeDispositionFilename(name)
+	if hash != "" {
+		// Strip the per-fetch random &ss= session token before hashing so ETag
+		// stays stable across identical playlist contents (upstream #938).
+		stableBody := sessionTokenParamRe.ReplaceAllString(m3u, "")
+		sum := sha1.Sum([]byte(hash + "/" + safeName + "\n" + stableBody))
+		c.Header("ETag", httptoo.EncodeQuotedString(hex.EncodeToString(sum[:])))
+	}
+	c.Header("Content-Disposition", `attachment; filename="`+safeName+`"`)
+	http.ServeContent(c.Writer, c.Request, safeName, time.Time{}, bytes.NewReader([]byte(m3u)))
 }
 
 // getM3uList renders the file entries of one torrent. startIndex (a file id,

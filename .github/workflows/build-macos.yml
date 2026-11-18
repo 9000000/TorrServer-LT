@@ -89,10 +89,11 @@ jobs:
         working-directory: server
         env:
           CGO_ENABLED: '1'
+          CGO_CXXFLAGS: '-DTSL_HAVE_LT_INTERNALS'
           PKG_CONFIG_PATH: ${{ github.workspace }}/_deps/darwin-arm64/lib/pkgconfig
           PKG_CONFIG_LIBDIR: ${{ github.workspace }}/_deps/darwin-arm64/lib/pkgconfig
           CGO_LDFLAGS: "-L${{ github.workspace }}/_deps/darwin-arm64/lib -framework SystemConfiguration -framework CoreFoundation"
-        run: go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
+        run: go test -count=1 -timeout 240s ./...
 
       # The x86_64 binary runs on the arm64 host via Rosetta, so both probe.
       - name: Probe --version

@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"server/torr/state"
+	"server/torr/storage/torrstor"
 )
 
 // ReadFile reads a small file of a torrent in full (external subtitles, for
@@ -23,12 +24,16 @@ func (t *Torrent) ReadFile(ctx context.Context, fileID int, maxSize int64) ([]by
 
 	// Resolve the file the way Stream does: by Id in the status, then by path
 	// among the torrent's files, so the ids match what the API hands out.
+	fileStats := t.Status().FileStats
 	var stFile *state.TorrentFileStat
-	for _, fileStat := range t.Status().FileStats {
+	for _, fileStat := range fileStats {
 		if fileStat.Id == fileID {
 			stFile = fileStat
 			break
 		}
+	}
+	if stFile == nil && len(fileStats) == 1 && fileID == 1 {
+		stFile = fileStats[0]
 	}
 	if stFile == nil {
 		return nil, fmt.Errorf("torr.ReadFile: file %d not found", fileID)
@@ -43,15 +48,26 @@ func (t *Torrent) ReadFile(ctx context.Context, fileID int, maxSize int64) ([]by
 	if file == nil {
 		return nil, fmt.Errorf("torr.ReadFile: file %d not found", fileID)
 	}
+	if file.Length < 0 {
+		return nil, fmt.Errorf("torr.ReadFile: invalid file length: %d", file.Length)
+	}
 	if file.Length > maxSize {
 		return nil, fmt.Errorf("torr.ReadFile: file too large: %d bytes (max %d)", file.Length, maxSize)
 	}
+	if file.Length == 0 {
+		return []byte{}, nil
+	}
 
-	reader := t.NewReader(file)
+	// Use AuxReaderGroup so auxiliary subtitle/file reads never masquerade as
+	// an active video stream (never abort preload or clobber burst peer caps),
+	// and disable optimistic unverified reads (upstream #924) so a corrupt
+	// peer block cannot corrupt parsed subtitle text.
+	reader := t.NewReaderGroup(file, torrstor.AuxReaderGroup)
 	if reader == nil {
 		return nil, errors.New("torr.ReadFile: no reader (cache not yet open)")
 	}
 	defer t.CloseReader(reader)
+	reader.SetResponsive(false)
 	// Unblock a read parked on a missing piece as soon as the caller gives up.
 	reader.SetContext(ctx)
 

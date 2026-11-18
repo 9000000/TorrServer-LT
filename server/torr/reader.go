@@ -18,4 +18,8 @@ type Reader interface {
 	// unblocks when the streaming client disconnects (e.g. the player seeks
 	// away and aborts the old range request). Call before the first Read.
 	SetContext(context.Context)
+	// SetResponsive toggles optimistic unverified block reads (true, default
+	// for video streaming) vs waiting for SHA-1 piece verification (false,
+	// used for whole-file subtitle/metadata reads).
+	SetResponsive(bool)
 }

@@ -580,3 +580,33 @@ func TestGetDefTrackersEmptyURLNoMirrorsSkipsFetch(t *testing.T) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
+
+
+func TestSaveTrackersFiltersPrivatePasskeys(t *testing.T) {
+	prevPath := settings.Path
+	prevRO := settings.ReadOnly
+	settings.Path = t.TempDir()
+	settings.ReadOnly = false
+	t.Cleanup(func() {
+		settings.Path = prevPath
+		settings.ReadOnly = prevRO
+	})
+
+	saveTrackersToFileSync([]string{
+		"udp://tracker.opentrackr.org:1337/announce",
+		"https://priv.example.org/announce?passkey=0123456789abcdef0123456789abcdef",
+		"http://priv.example.org/0123456789abcdef0123456789abcdef/announce",
+		"http://user:secret@priv.example.org/announce",
+		"http://192.168.1.10:6969/announce",
+		"http://tracker.openbittorrent.com:80/announce",
+	})
+
+	got := GetTrackerFromFile()
+	want := []string{
+		"udp://tracker.opentrackr.org:1337/announce",
+		"http://tracker.openbittorrent.com:80/announce",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetTrackerFromFile() = %#v, want %#v", got, want)
+	}
+}

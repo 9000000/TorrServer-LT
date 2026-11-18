@@ -43,6 +43,13 @@ func (m *MemPiece) ReadAt(b []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// Allocated returns the RAM held by the backing buffer. The whole piece is
+// allocated on the first write, so this can be much larger than the payload
+// bytes received so far (upstream #955). Caller must hold piece.mu.
+func (m *MemPiece) Allocated() int64 {
+	return int64(cap(m.buf))
+}
+
 // Release drops the backing buffer (the next write re-allocates).
 func (m *MemPiece) Release() {
 	m.buf = nil

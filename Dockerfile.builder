@@ -110,7 +110,7 @@ ENV TS_CONF_PATH="/opt/ts/config" \
     TS_PORT=${TS_PORT} \
     GODEBUG=madvdontneed=1
 
-RUN apk add --no-cache ca-certificates libstdc++ \
+RUN apk add --no-cache ca-certificates \
  && rm -rf /var/cache/apk/* /usr/share/locale /usr/share/man /usr/share/doc /usr/share/gtk-doc
 
 COPY --link --from=go-build /out/TorrServer-LT /usr/local/bin/TorrServer-LT

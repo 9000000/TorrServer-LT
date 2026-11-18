@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -181,7 +182,14 @@ func cAlloc(call func(*C.size_t) *C.char) ([]byte, error) {
 
 // Session wraps a libtorrent session.
 type Session struct {
-	id C.lt_session
+	id atomic.Int64
+}
+
+func (s *Session) sid() C.lt_session {
+	if s == nil {
+		return 0
+	}
+	return C.lt_session(s.id.Load())
 }
 
 // SessionConfig is a thin alias over the JSON-encodable settings_pack dict.
@@ -206,23 +214,29 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 	if id == 0 {
 		return nil, lastError()
 	}
-	return &Session{id: id}, nil
+	sess := &Session{}
+	sess.id.Store(int64(id))
+	return sess, nil
 }
 
 // Close destroys the session and drops all torrents (without persisting).
 // After Close the Session is unusable.
 func (s *Session) Close() error {
-	if s == nil || s.id == 0 {
+	if s == nil {
 		return nil
 	}
-	rc := C.lt_session_destroy(s.id)
-	s.id = 0
+	id := s.id.Swap(0)
+	if id == 0 {
+		return nil
+	}
+	rc := C.lt_session_destroy(C.lt_session(id))
 	return codeToErr(rc)
 }
 
 // ApplySettings updates a running session.
 func (s *Session) ApplySettings(cfg SessionConfig) error {
-	if s == nil || s.id == 0 {
+	sid := s.sid()
+	if sid == 0 {
 		return ErrInvalid
 	}
 	b, err := json.Marshal(cfg)
@@ -231,19 +245,20 @@ func (s *Session) ApplySettings(cfg SessionConfig) error {
 	}
 	cs := C.CString(string(b))
 	defer C.free(unsafe.Pointer(cs))
-	return codeToErr(C.lt_session_apply_settings(s.id, cs))
+	return codeToErr(C.lt_session_apply_settings(sid, cs))
 }
 
 // SettingInt reads back an int settings_pack value from the live session by
 // name (e.g. "dht_max_peers"). Useful to confirm a setting was actually applied.
 func (s *Session) SettingInt(name string) (int64, error) {
-	if s == nil || s.id == 0 {
+	sid := s.sid()
+	if sid == 0 {
 		return 0, ErrInvalid
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	var out C.int64_t
-	if err := codeToErr(C.lt_session_get_setting_int(s.id, cName, &out)); err != nil {
+	if err := codeToErr(C.lt_session_get_setting_int(sid, cName, &out)); err != nil {
 		return 0, err
 	}
 	return int64(out), nil
@@ -252,20 +267,22 @@ func (s *Session) SettingInt(name string) (int64, error) {
 // SetIPFilter installs an IP filter from a P2P-format text block.
 // Pass "" to clear the filter.
 func (s *Session) SetIPFilter(p2pText string) error {
-	if s == nil || s.id == 0 {
+	sid := s.sid()
+	if sid == 0 {
 		return ErrInvalid
 	}
 	cs := C.CString(p2pText)
 	defer C.free(unsafe.Pointer(cs))
-	return codeToErr(C.lt_session_set_ip_filter(s.id, cs))
+	return codeToErr(C.lt_session_set_ip_filter(sid, cs))
 }
 
 // SetAlertMask installs the libtorrent alert_mask. Pass 0 for defaults.
 func (s *Session) SetAlertMask(mask uint32) error {
-	if s == nil || s.id == 0 {
+	sid := s.sid()
+	if sid == 0 {
 		return ErrInvalid
 	}
-	return codeToErr(C.lt_session_set_alert_mask(s.id, C.uint32_t(mask)))
+	return codeToErr(C.lt_session_set_alert_mask(sid, C.uint32_t(mask)))
 }
 
 // ----- AddTorrent -----
@@ -286,6 +303,10 @@ type AddTorrentParams struct {
 	SavePath string
 	// Paused starts the torrent paused.
 	Paused bool
+	// DefaultDontDownload starts every piece at priority 0 (lazy streaming mode)
+	// directly inside libtorrent's add_torrent_params so no random pieces are
+	// requested before Go receives metadata.
+	DefaultDontDownload bool
 	// HavePieces is a packed bitmap (LSB-first) indicating pieces that
 	// are already present locally. PieceCount must be set to the number
 	// of valid bits (typically the torrent's piece count). When non-empty,
@@ -298,7 +319,8 @@ type AddTorrentParams struct {
 
 // AddTorrent adds a torrent to the session and returns a handle.
 func (s *Session) AddTorrent(p AddTorrentParams) (*Torrent, error) {
-	if s == nil || s.id == 0 {
+	sid := s.sid()
+	if sid == 0 {
 		return nil, ErrInvalid
 	}
 	var (
@@ -331,9 +353,12 @@ func (s *Session) AddTorrent(p AddTorrentParams) (*Torrent, error) {
 		cInfo = (*C.uint8_t)(unsafe.Pointer(&p.InfoBytes[0]))
 		cInfoLen = C.size_t(len(p.InfoBytes))
 	}
-	paused := C.int(0)
+	flags := C.int(0)
 	if p.Paused {
-		paused = 1
+		flags |= C.LT_ADD_PAUSED
+	}
+	if p.DefaultDontDownload {
+		flags |= C.LT_ADD_DONT_DOWNLOAD
 	}
 	var (
 		cHaveBuf  *C.uint8_t
@@ -343,11 +368,13 @@ func (s *Session) AddTorrent(p AddTorrentParams) (*Torrent, error) {
 		cHaveBuf = (*C.uint8_t)(unsafe.Pointer(&p.HavePieces[0]))
 		cHaveBits = C.int(p.PieceCount)
 	}
-	id := C.lt_session_add_torrent(s.id, cLink, cInfo, cInfoLen, cTrackers, cSave, paused, cHaveBuf, cHaveBits)
+	id := C.lt_session_add_torrent(sid, cLink, cInfo, cInfoLen, cTrackers, cSave, flags, cHaveBuf, cHaveBits)
 	if id == 0 {
 		return nil, lastError()
 	}
-	return &Torrent{sess: s, id: id}, nil
+	tor := &Torrent{sess: s}
+	tor.id.Store(int64(id))
+	return tor, nil
 }
 
 // ----- Torrent -----
@@ -355,49 +382,66 @@ func (s *Session) AddTorrent(p AddTorrentParams) (*Torrent, error) {
 // Torrent is a handle to a single torrent inside a Session.
 type Torrent struct {
 	sess *Session
-	id   C.lt_torrent
+	id   atomic.Int64
+}
+
+func (t *Torrent) tid() C.lt_torrent {
+	if t == nil {
+		return 0
+	}
+	return C.lt_torrent(t.id.Load())
 }
 
 // ID returns the opaque shim handle.
-func (t *Torrent) ID() int64 { return int64(t.id) }
+func (t *Torrent) ID() int64 {
+	if t == nil {
+		return 0
+	}
+	return t.id.Load()
+}
 
 // Remove deletes the torrent from the session. If deleteFiles is true,
 // libtorrent also unlinks the on-disk data (currently unused — see Etap 4).
 func (t *Torrent) Remove(deleteFiles bool) error {
-	if t == nil || t.id == 0 || t.sess == nil {
+	tid := t.tid()
+	if tid == 0 || t.sess == nil {
+		return ErrInvalid
+	}
+	sid := t.sess.sid()
+	if sid == 0 {
 		return ErrInvalid
 	}
 	df := C.int(0)
 	if deleteFiles {
 		df = 1
 	}
-	rc := C.lt_torrent_remove(t.sess.id, t.id, df)
+	rc := C.lt_torrent_remove(sid, tid, df)
 	if rc == C.LT_OK {
-		t.id = 0
+		t.id.CompareAndSwap(int64(tid), 0)
 	}
 	return codeToErr(rc)
 }
 
-func (t *Torrent) Pause() error        { return codeToErr(C.lt_torrent_pause(t.id)) }
-func (t *Torrent) Resume() error       { return codeToErr(C.lt_torrent_resume(t.id)) }
-func (t *Torrent) ForceRecheck() error { return codeToErr(C.lt_torrent_force_recheck(t.id)) }
+func (t *Torrent) Pause() error        { return codeToErr(C.lt_torrent_pause(t.tid())) }
+func (t *Torrent) Resume() error       { return codeToErr(C.lt_torrent_resume(t.tid())) }
+func (t *Torrent) ForceRecheck() error { return codeToErr(C.lt_torrent_force_recheck(t.tid())) }
 
 // ForceReannounce re-announces to all trackers immediately (ignoring the min
 // interval). ForceDhtAnnounce does the same for the DHT. Used at playback start
 // to find peers fast for a lazily-added torrent.
-func (t *Torrent) ForceReannounce() error  { return codeToErr(C.lt_torrent_force_reannounce(t.id)) }
-func (t *Torrent) ForceDhtAnnounce() error { return codeToErr(C.lt_torrent_force_dht_announce(t.id)) }
+func (t *Torrent) ForceReannounce() error  { return codeToErr(C.lt_torrent_force_reannounce(t.tid())) }
+func (t *Torrent) ForceDhtAnnounce() error { return codeToErr(C.lt_torrent_force_dht_announce(t.tid())) }
 
 // SetMaxConnections caps how many peer connections this torrent may use.
 // n <= 0 means unlimited. The BTsets "connections limit" is per-torrent
 // (anacrolix legacy), unlike settings_pack's session-wide connections_limit.
 func (t *Torrent) SetMaxConnections(n int) error {
-	return codeToErr(C.lt_torrent_set_max_connections(t.id, C.int(n)))
+	return codeToErr(C.lt_torrent_set_max_connections(t.tid(), C.int(n)))
 }
 
 // HaveMetadata reports whether libtorrent has the .torrent's info dict yet.
 func (t *Torrent) HaveMetadata() (bool, error) {
-	rc := C.lt_torrent_have_metadata(t.id)
+	rc := C.lt_torrent_have_metadata(t.tid())
 	if rc < 0 {
 		return false, codeToErr(rc)
 	}
@@ -406,22 +450,24 @@ func (t *Torrent) HaveMetadata() (bool, error) {
 
 // Metadata returns the raw info-dict bytes once metadata has been received.
 func (t *Torrent) Metadata() ([]byte, error) {
+	tid := t.tid()
 	return cAlloc(func(n *C.size_t) *C.char {
-		return C.lt_torrent_metadata_alloc(t.id, n)
+		return C.lt_torrent_metadata_alloc(tid, n)
 	})
 }
 
 // File describes a single entry inside the torrent.
 type File struct {
-	Index  int
-	Path   string
-	Size   int64
-	Offset int64
+	Index  int    `json:"index"`
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	Offset int64  `json:"offset"`
 }
 
 // Files returns the full file list once metadata is available.
 func (t *Torrent) Files() ([]File, error) {
-	n := int(C.lt_torrent_num_files(t.id))
+	tid := t.tid()
+	n := int(C.lt_torrent_num_files(tid))
 	if n <= 0 {
 		return nil, nil
 	}
@@ -429,10 +475,10 @@ func (t *Torrent) Files() ([]File, error) {
 	for i := 0; i < n; i++ {
 		idx := C.int(i)
 		path := cStringBuf(func(buf *C.char, cap C.size_t) C.size_t {
-			return C.lt_torrent_file_path(t.id, idx, buf, cap)
+			return C.lt_torrent_file_path(tid, idx, buf, cap)
 		}, 256)
-		size := int64(C.lt_torrent_file_size(t.id, idx))
-		off := int64(C.lt_torrent_file_offset(t.id, idx))
+		size := int64(C.lt_torrent_file_size(tid, idx))
+		off := int64(C.lt_torrent_file_offset(tid, idx))
 		if size < 0 || off < 0 {
 			return out, lastError()
 		}
@@ -442,44 +488,46 @@ func (t *Torrent) Files() ([]File, error) {
 }
 
 // NumPieces returns the total piece count (0 before metadata).
-func (t *Torrent) NumPieces() int { return int(C.lt_torrent_num_pieces(t.id)) }
+func (t *Torrent) NumPieces() int { return int(C.lt_torrent_num_pieces(t.tid())) }
 
 // HasPiece reports whether libtorrent's picker considers the piece downloaded
 // and verified. Used to detect a have-bitfield vs cache desync.
 func (t *Torrent) HasPiece(piece int) bool {
-	return C.lt_torrent_have_piece(t.id, C.int(piece)) == 1
+	return C.lt_torrent_have_piece(t.tid(), C.int(piece)) == 1
 }
 
 // PieceLength returns the piece length in bytes (0 before metadata).
-func (t *Torrent) PieceLength() int64 { return int64(C.lt_torrent_piece_length(t.id)) }
+func (t *Torrent) PieceLength() int64 { return int64(C.lt_torrent_piece_length(t.tid())) }
 
 // TotalSize returns the sum of file sizes (0 before metadata).
-func (t *Torrent) TotalSize() int64 { return int64(C.lt_torrent_total_size(t.id)) }
+func (t *Torrent) TotalSize() int64 { return int64(C.lt_torrent_total_size(t.tid())) }
 
 // DisplayName returns the torrent name (set on the torrent or magnet's dn=).
 func (t *Torrent) DisplayName() string {
+	tid := t.tid()
 	return cStringBuf(func(buf *C.char, cap C.size_t) C.size_t {
-		return C.lt_torrent_display_name(t.id, buf, cap)
+		return C.lt_torrent_display_name(tid, buf, cap)
 	}, 128)
 }
 
 // InfoHash returns the v1 SHA-1 info hash as a 40-char lowercase hex string.
 func (t *Torrent) InfoHash() string {
+	tid := t.tid()
 	return cStringBuf(func(buf *C.char, cap C.size_t) C.size_t {
-		return C.lt_torrent_info_hash_hex(t.id, buf, cap)
+		return C.lt_torrent_info_hash_hex(tid, buf, cap)
 	}, 41)
 }
 
 // SetPiecePriority sets the per-piece download priority (0..7).
 func (t *Torrent) SetPiecePriority(piece, prio int) error {
-	return codeToErr(C.lt_torrent_set_piece_priority(t.id, C.int(piece), C.int(prio)))
+	return codeToErr(C.lt_torrent_set_piece_priority(t.tid(), C.int(piece), C.int(prio)))
 }
 
 // SetAllPiecesPriority sets every piece to prio in one call. Used to switch a
 // torrent to lazy/streaming mode (prio 0 = download nothing until a Reader or
 // Preload bumps the pieces it actually needs).
 func (t *Torrent) SetAllPiecesPriority(prio int) error {
-	return codeToErr(C.lt_torrent_set_all_pieces_priority(t.id, C.int(prio)))
+	return codeToErr(C.lt_torrent_set_all_pieces_priority(t.tid(), C.int(prio)))
 }
 
 // PrioritizePieces sets the WHOLE piece-priority vector in one call: prios[i] is
@@ -496,7 +544,7 @@ func (t *Torrent) PrioritizePieces(prios []int) error {
 	for i, p := range prios {
 		cprios[i] = C.int(p)
 	}
-	return codeToErr(C.lt_torrent_prioritize_pieces(t.id, &cprios[0], C.int(len(cprios))))
+	return codeToErr(C.lt_torrent_prioritize_pieces(t.tid(), &cprios[0], C.int(len(cprios))))
 }
 
 // WeDontHave tells libtorrent's piece_picker to forget that it has the given
@@ -507,7 +555,7 @@ func (t *Torrent) PrioritizePieces(prios []int) error {
 // the have bit, applied atomically with the un-have on the network thread; pass
 // a top priority (7) to re-download it now, 0 to leave it lazy.
 func (t *Torrent) WeDontHave(piece, prio int) error {
-	return codeToErr(C.lt_torrent_we_dont_have(t.id, C.int(piece), C.int(prio)))
+	return codeToErr(C.lt_torrent_we_dont_have(t.tid(), C.int(piece), C.int(prio)))
 }
 
 // SetPieceDeadline sets a soft deadline (in ms) for a piece, optionally
@@ -517,7 +565,7 @@ func (t *Torrent) SetPieceDeadline(piece, deadlineMs int, alertWhenReady bool) e
 	if alertWhenReady {
 		a = 1
 	}
-	return codeToErr(C.lt_torrent_set_piece_deadline(t.id, C.int(piece), C.int(deadlineMs), a))
+	return codeToErr(C.lt_torrent_set_piece_deadline(t.tid(), C.int(piece), C.int(deadlineMs), a))
 }
 
 // ResetPieceDeadline removes a single piece from the time-critical (deadline)
@@ -527,12 +575,12 @@ func (t *Torrent) SetPieceDeadline(piece, deadlineMs int, alertWhenReady bool) e
 // scrolls out of its window, otherwise libtorrent keeps pulling the abandoned
 // region after a seek (download-then-evict-then-redownload churn).
 func (t *Torrent) ResetPieceDeadline(piece int) error {
-	return codeToErr(C.lt_torrent_reset_piece_deadline(t.id, C.int(piece)))
+	return codeToErr(C.lt_torrent_reset_piece_deadline(t.tid(), C.int(piece)))
 }
 
 // ClearPieceDeadlines drops all streaming deadlines on this torrent.
 func (t *Torrent) ClearPieceDeadlines() error {
-	return codeToErr(C.lt_torrent_clear_piece_deadlines(t.id))
+	return codeToErr(C.lt_torrent_clear_piece_deadlines(t.tid()))
 }
 
 // SetSequentialDownload makes the piece picker prefer the lowest-indexed wanted
@@ -544,12 +592,12 @@ func (t *Torrent) SetSequentialDownload(enable bool) error {
 	if enable {
 		e = 1
 	}
-	return codeToErr(C.lt_torrent_set_sequential_download(t.id, e))
+	return codeToErr(C.lt_torrent_set_sequential_download(t.tid(), e))
 }
 
 // SetFilePriority sets the priority for a file (0..7).
 func (t *Torrent) SetFilePriority(file, prio int) error {
-	return codeToErr(C.lt_torrent_set_file_priority(t.id, C.int(file), C.int(prio)))
+	return codeToErr(C.lt_torrent_set_file_priority(t.tid(), C.int(file), C.int(prio)))
 }
 
 // Status is a snapshot of a torrent's runtime state, as exposed by the
@@ -581,8 +629,9 @@ type Status struct {
 
 // Status returns the current torrent_status, decoded from the shim's JSON.
 func (t *Torrent) Status() (*Status, error) {
+	tid := t.tid()
 	raw := cStringBuf(func(buf *C.char, cap C.size_t) C.size_t {
-		return C.lt_torrent_status_json(t.id, buf, cap)
+		return C.lt_torrent_status_json(tid, buf, cap)
 	}, 1024)
 	if raw == "" {
 		return nil, lastError()
@@ -617,11 +666,15 @@ type Alert struct {
 // WaitAlert blocks until at least one alert is available, or timeout elapses.
 // Returns true if at least one alert is ready.
 func (s *Session) WaitAlert(timeout time.Duration) (bool, error) {
+	sid := s.sid()
+	if sid == 0 {
+		return false, ErrInvalid
+	}
 	ms := C.int(timeout / time.Millisecond)
 	if ms < 0 {
 		ms = -1
 	}
-	rc := C.lt_session_wait_alert(s.id, ms)
+	rc := C.lt_session_wait_alert(sid, ms)
 	if rc < 0 {
 		return false, codeToErr(rc)
 	}
@@ -630,8 +683,12 @@ func (s *Session) WaitAlert(timeout time.Duration) (bool, error) {
 
 // PopAlerts drains the alert queue.
 func (s *Session) PopAlerts() ([]Alert, error) {
+	sid := s.sid()
+	if sid == 0 {
+		return nil, ErrInvalid
+	}
 	raw, err := cAlloc(func(n *C.size_t) *C.char {
-		return C.lt_session_pop_alerts_json_alloc(s.id, n)
+		return C.lt_session_pop_alerts_json_alloc(sid, n)
 	})
 	if err != nil {
 		return nil, err
@@ -657,8 +714,12 @@ func (s *Session) PopAlerts() ([]Alert, error) {
 // RequestSessionStats fires off a session_stats request — the actual values
 // arrive asynchronously through the alert pump.
 func (s *Session) RequestSessionStats() error {
+	sid := s.sid()
+	if sid == 0 {
+		return ErrInvalid
+	}
 	_, err := cAlloc(func(n *C.size_t) *C.char {
-		return C.lt_session_stats_json_alloc(s.id, n)
+		return C.lt_session_stats_json_alloc(sid, n)
 	})
 	return err
 }
@@ -676,6 +737,8 @@ type ParsedTorrent struct {
 	NumPieces    int      `json:"num_pieces,omitempty"`
 	PieceLength  int64    `json:"piece_length,omitempty"`
 	TotalSize    int64    `json:"total_size,omitempty"`
+	Private      bool     `json:"private,omitempty"`
+	Files        []File   `json:"files,omitempty"`
 }
 
 // ParseMagnet parses a magnet URI and returns its info hash, display name and
@@ -781,12 +844,15 @@ func storageSnapshot() StorageCallbacks {
 func RegisterStorageCallbacks(cb StorageCallbacks) error {
 	empty := cb.Open == nil && cb.Close == nil && cb.Deleted == nil &&
 		cb.Read == nil && cb.Write == nil && cb.Have == nil
+	if empty {
+		// Unset the C-side flag so future NewSession calls use libtorrent's default
+		// disk_io, while keeping the Go-side handlers intact for any already-running
+		// session whose async teardown still invokes Close/Read callbacks.
+		return codeToErr(C.tsl_uninstall_go_storage_callbacks())
+	}
 	storageMu.Lock()
 	storage = cb
 	storageMu.Unlock()
-	if empty {
-		return codeToErr(C.tsl_uninstall_go_storage_callbacks())
-	}
 	return codeToErr(C.tsl_install_go_storage_callbacks())
 }
 

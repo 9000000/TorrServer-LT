@@ -49,7 +49,12 @@ func UpdateGStreamerSettings(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config is required"})
 			return
 		}
-		if err := gstreamer.UpdateConfig(*req.Config); err != nil {
+		// Never allow overriding GSTPath over HTTP (prevents loading arbitrary
+		// shared libraries via purego.Dlopen); GSTPath may only be configured
+		// locally in settings.json or platform defaults.
+		cfg := *req.Config
+		cfg.GSTPath = gstreamer.CurrentConfig().GSTPath
+		if err := gstreamer.UpdateConfig(cfg); err != nil {
 			if err.Error() == "read-only mode" {
 				c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 				return

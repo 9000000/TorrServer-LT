@@ -48,6 +48,14 @@ function getMimeType(url) {
   }
 }
 
+let sharedProbeVideo = null
+const getProbeVideo = () => {
+  if (!sharedProbeVideo && typeof document !== 'undefined') {
+    sharedProbeVideo = document.createElement('video')
+  }
+  return sharedProbeVideo
+}
+
 const canPlayNativeHls = video =>
   Boolean(video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('application/x-mpegURL'))
 
@@ -366,7 +374,8 @@ const VideoPlayer = ({
   }, [onNotSupported])
 
   useEffect(() => {
-    const vid = document.createElement('video')
+    const vid = getProbeVideo()
+    if (!vid) return
     const supported = hls ? Hls.isSupported() || canPlayNativeHls(vid) : Boolean(vid.canPlayType(getMimeType(videoSrc)))
     if (!supported) onNotSupportedRef.current?.()
   }, [hls, videoSrc])
@@ -488,7 +497,6 @@ const VideoPlayer = ({
     video.paused ? video.play() : video.pause()
   }, [])
 
-  const togglePlay = () => setPlaying(p => !p)
   const handleTimeUpdate = () => setCurrentTime(videoRef.current.currentTime)
   const handleLoaded = () => {
     setDuration(videoRef.current.duration)
@@ -524,10 +532,11 @@ const VideoPlayer = ({
   const exitFull = () => document.exitFullscreen()
 
   useEffect(() => {
+    if (!open) return undefined
     const onFull = () => setFullscreen(!!document.fullscreenElement)
     document.addEventListener('fullscreenchange', onFull)
     return () => document.removeEventListener('fullscreenchange', onFull)
-  }, [])
+  }, [open])
 
   const openSpeedMenu = e => setAnchorEl(e.currentTarget)
   const closeSpeedMenu = () => setAnchorEl(null)
@@ -594,9 +603,10 @@ const VideoPlayer = ({
     [open, isMobile, handlePlayPause, skip],
   )
   useEffect(() => {
+    if (!open) return undefined
     document.addEventListener('keydown', handleKey)
     return () => document.removeEventListener('keydown', handleKey)
-  }, [handleKey])
+  }, [open, handleKey])
 
   return (
     <>
@@ -649,8 +659,8 @@ const VideoPlayer = ({
               src={hls ? undefined : videoSrc}
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleLoaded}
-              onPlay={togglePlay}
-              onPause={togglePlay}
+              onPlay={() => setPlaying(true)}
+              onPause={() => setPlaying(false)}
               className={classes.video}
             >
               <track kind='captions' srcLang='en' label='English captions' src={hls ? undefined : captionSrc} default />

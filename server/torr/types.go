@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Hash is the v1 SHA-1 BitTorrent info hash. JSON-encoded as a 40-char
@@ -55,8 +56,19 @@ func (h *Hash) UnmarshalText(b []byte) error {
 // Hash if the input is malformed.
 func NewHashFromHex(s string) Hash {
 	var h Hash
-	_ = h.UnmarshalText([]byte(s))
+	_ = h.UnmarshalText([]byte(strings.TrimSpace(s)))
 	return h
+}
+
+// ParseHash parses an exact 40-char hex info-hash string and rejects
+// malformed or all-zero hashes (upstream #941).
+func ParseHash(s string) (Hash, bool) {
+	s = strings.TrimSpace(s)
+	var h Hash
+	if err := h.UnmarshalText([]byte(s)); err != nil || h.IsZero() {
+		return Hash{}, false
+	}
+	return h, true
 }
 
 // MustParseHash is the panicking variant of NewHashFromHex.
@@ -89,6 +101,28 @@ func (s *TorrentSpec) FlatTrackers() []string {
 		out = append(out, tier...)
 	}
 	return out
+}
+
+// Clone returns a deep copy of TorrentSpec so callers can enrich Trackers
+// or InfoBytes without mutating shared specs.
+func (s *TorrentSpec) Clone() *TorrentSpec {
+	if s == nil {
+		return nil
+	}
+	cp := &TorrentSpec{
+		InfoHash:    s.InfoHash,
+		DisplayName: s.DisplayName,
+	}
+	if len(s.InfoBytes) > 0 {
+		cp.InfoBytes = append([]byte(nil), s.InfoBytes...)
+	}
+	if len(s.Trackers) > 0 {
+		cp.Trackers = make([][]string, len(s.Trackers))
+		for i, tier := range s.Trackers {
+			cp.Trackers[i] = append([]string(nil), tier...)
+		}
+	}
+	return cp
 }
 
 // File is the user-visible per-file description, decoupled from any engine.

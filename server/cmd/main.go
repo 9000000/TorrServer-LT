@@ -120,7 +120,14 @@ func main() {
 		go func() {
 			time.Sleep(time.Second)
 			if params.Ssl {
-				browser.OpenURL("https://127.0.0.1:" + params.SslPort)
+				sslPort := params.SslPort
+				if sslPort == "" {
+					sslPort = settings.SslPort
+				}
+				if sslPort == "" {
+					sslPort = settings.DefaultSslPort
+				}
+				browser.OpenURL("https://127.0.0.1:" + sslPort)
 			} else {
 				browser.OpenURL("http://127.0.0.1:" + params.Port)
 			}
@@ -488,17 +495,22 @@ func (d *DNSChecker) LookupHostWithFallback(host string) ([]string, error) {
 // getFromCache retrieves DNS results from cache
 func (d *DNSChecker) getFromCache(host string) ([]string, bool) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
+	addrs, ok := d.cache[host]
+	cachedAt := d.cacheTime[host]
+	d.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(cachedAt) < d.config.CacheDuration {
+		return append([]string(nil), addrs...), true
+	}
 
-	if addrs, ok := d.cache[host]; ok {
-		if time.Since(d.cacheTime[host]) < d.config.CacheDuration {
-			return addrs, true
-		}
-		// Expired, remove from cache
+	d.mu.Lock()
+	if curAt, stillOK := d.cacheTime[host]; stillOK && time.Since(curAt) >= d.config.CacheDuration {
 		delete(d.cache, host)
 		delete(d.cacheTime, host)
 	}
-
+	d.mu.Unlock()
 	return nil, false
 }
 

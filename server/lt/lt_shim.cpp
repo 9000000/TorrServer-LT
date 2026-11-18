@@ -208,6 +208,7 @@ std::shared_mutex g_torr_mu;
 // make every future add of the same info-hash return the dead id ("torrent
 // not found" forever).
 struct torrent_entry {
+    lt_session sid;
     lt::torrent_handle h;
     std::string hex; // 40-char lowercase v1 info-hash
 };
@@ -229,9 +230,10 @@ lt::torrent_handle get_torrent(lt_torrent id) {
     return it->second.h;
 }
 
-int64_t register_torrent(lt::torrent_handle const& h) {
+int64_t register_torrent(lt_session sid, lt::torrent_handle const& h) {
     if (!h.is_valid()) return 0;
     auto hashes = h.info_hashes();
+    if (!hashes.has_v1()) return 0;
     std::string hex = sha1_hex(hashes.v1);
     std::unique_lock<std::shared_mutex> lk(g_torr_mu);
     auto exist = g_hash2id.find(hex);
@@ -241,14 +243,15 @@ int64_t register_torrent(lt::torrent_handle const& h) {
         // same id; returning the dead id would break the new torrent.
         auto told = g_torrents.find(exist->second);
         if (told == g_torrents.end()) {
-            g_torrents.emplace(exist->second, torrent_entry{h, hex});
+            g_torrents.emplace(exist->second, torrent_entry{sid, h, hex});
         } else if (!told->second.h.is_valid()) {
+            told->second.sid = sid;
             told->second.h = h;
         }
         return exist->second;
     }
     int64_t id = g_next_torr++;
-    g_torrents.emplace(id, torrent_entry{h, hex});
+    g_torrents.emplace(id, torrent_entry{sid, h, hex});
     g_hash2id.emplace(std::move(hex), id);
     return id;
 }
@@ -533,7 +536,7 @@ lt_session lt_session_new(const char* settings_json) {
                 }
                 std::string warn;
                 json_into_settings(j, params.settings, &warn);
-                if (!warn.empty()) g_last_error = "settings warnings: " + warn;
+                if (!warn.empty()) set_err(LT_OK, "settings warnings: " + warn);
             } catch (std::exception const& e) {
                 set_err(LT_ERR_PARSE, std::string("settings json parse: ") + e.what());
                 return 0;
@@ -585,7 +588,7 @@ int lt_session_apply_settings(lt_session id, const char* settings_json) {
     std::string warn;
     json_into_settings(j, sp, &warn);
     slot->s->apply_settings(std::move(sp));
-    if (!warn.empty()) g_last_error = "settings warnings: " + warn;
+    if (!warn.empty()) set_err(LT_OK, "settings warnings: " + warn);
     return LT_OK;
     WRAP_END(LT_ERR_INTERNAL)
 }
@@ -637,11 +640,17 @@ int lt_session_destroy(lt_session id) {
         slot = std::move(it->second);
         g_sessions.erase(it);
     }
-    // Forget all torrents — we only ever have one session at a time.
+    // Forget only torrents belonging to this session so parallel test sessions stay isolated.
     {
         std::unique_lock<std::shared_mutex> lk(g_torr_mu);
-        g_torrents.clear();
-        g_hash2id.clear();
+        for (auto it = g_torrents.begin(); it != g_torrents.end(); ) {
+            if (it->second.sid == id) {
+                g_hash2id.erase(it->second.hex);
+                it = g_torrents.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     slot.reset();
     return LT_OK;
@@ -692,10 +701,18 @@ lt_torrent lt_session_add_torrent(
         atp.save_path = save_path ? save_path : ".";
 
         if (info_bytes && info_len > 0) {
+            if (info_len > (64u << 20)) {
+                set_err(LT_ERR_INVALID, "torrent metadata exceeds 64 MiB");
+                return 0;
+            }
             lt::error_code ec;
             atp.ti = parse_torrent_or_info(
                 reinterpret_cast<char const*>(info_bytes), static_cast<int>(info_len), ec);
             if (ec || !atp.ti) { set_err_ec(LT_ERR_PARSE, ec); return 0; }
+            if (!atp.ti->info_hashes().has_v1()) {
+                set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only torrents are not supported");
+                return 0;
+            }
         } else if (link && *link) {
             std::string l(link);
             if (l.size() == 40) {
@@ -715,6 +732,10 @@ lt_torrent lt_session_add_torrent(
                 set_err(LT_ERR_NOT_IMPL, "http/file links must be pre-fetched");
                 return 0;
             }
+            if (!atp.info_hashes.has_v1()) {
+                set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only torrents are not supported");
+                return 0;
+            }
         } else {
             set_err(LT_ERR_INVALID, "link and info_bytes are both empty");
             return 0;
@@ -726,12 +747,15 @@ lt_torrent lt_session_add_torrent(
             }
         }
 
-        if (paused) {
+        if (paused & LT_ADD_PAUSED) {
             atp.flags |= lt::torrent_flags::paused;
             atp.flags &= ~lt::torrent_flags::auto_managed;
         } else {
             atp.flags &= ~lt::torrent_flags::paused;
             atp.flags |= lt::torrent_flags::auto_managed;
+        }
+        if (paused & LT_ADD_DONT_DOWNLOAD) {
+            atp.flags |= lt::torrent_flags::default_dont_download;
         }
 
         if (have_pieces_bitmap && have_pieces_count > 0) {
@@ -753,7 +777,7 @@ lt_torrent lt_session_add_torrent(
         if (ec) { set_err_ec(LT_ERR_INTERNAL, ec); return 0; }
         if (!h.is_valid()) { set_err(LT_ERR_INTERNAL, "invalid handle"); return 0; }
 
-        return register_torrent(h);
+        return register_torrent(sid, h);
     } catch (std::exception const& e) {
         set_err(LT_ERR_INTERNAL, e.what());
         return 0;
@@ -868,7 +892,6 @@ int lt_torrent_num_files(lt_torrent tid) {
 }
 
 size_t lt_torrent_file_path(lt_torrent tid, int idx, char* buf, size_t cap) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return 0; }
@@ -885,7 +908,6 @@ size_t lt_torrent_file_path(lt_torrent tid, int idx, char* buf, size_t cap) {
 }
 
 int64_t lt_torrent_file_size(lt_torrent tid, int idx) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
@@ -901,7 +923,6 @@ int64_t lt_torrent_file_size(lt_torrent tid, int idx) {
 }
 
 int64_t lt_torrent_file_offset(lt_torrent tid, int idx) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
@@ -932,6 +953,7 @@ int lt_torrent_num_pieces(lt_torrent tid) {
 // un-have just that piece on demand. Returns 1 = have, 0 = not, -1 = error.
 int lt_torrent_have_piece(lt_torrent tid, int piece_idx) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     return h.have_piece(lt::piece_index_t{piece_idx}) ? 1 : 0;
@@ -939,7 +961,6 @@ int lt_torrent_have_piece(lt_torrent tid, int piece_idx) {
 }
 
 int64_t lt_torrent_piece_length(lt_torrent tid) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
@@ -953,7 +974,6 @@ int64_t lt_torrent_piece_length(lt_torrent tid) {
 }
 
 int64_t lt_torrent_total_size(lt_torrent tid) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
@@ -967,7 +987,6 @@ int64_t lt_torrent_total_size(lt_torrent tid) {
 }
 
 size_t lt_torrent_display_name(lt_torrent tid, char* buf, size_t cap) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return 0; }
@@ -980,7 +999,6 @@ size_t lt_torrent_display_name(lt_torrent tid, char* buf, size_t cap) {
 }
 
 size_t lt_torrent_info_hash_hex(lt_torrent tid, char* buf, size_t cap) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return 0; }
@@ -996,6 +1014,7 @@ size_t lt_torrent_info_hash_hex(lt_torrent tid, char* buf, size_t cap) {
 
 int lt_torrent_set_piece_priority(lt_torrent tid, int piece_idx, int prio) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     if (prio < 0 || prio > 7) return set_err(LT_ERR_INVALID, "prio out of range");
@@ -1069,6 +1088,7 @@ int lt_torrent_prioritize_pieces(lt_torrent tid, const int* prios, int count) {
 // non-zero prio; pass 0 to un-have and leave it lazy.
 int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     if (prio < 0 || prio > 7) return set_err(LT_ERR_INVALID, "prio out of range");
@@ -1077,27 +1097,20 @@ int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
     if (!tor) return set_err(LT_ERR_NOT_FOUND, "no native handle");
     h.reset_piece_deadline(lt::piece_index_t{piece_idx});
     lt::io_context& ioc = tor->session().get_context();
-    lt::post(ioc, [tor, piece_idx, prio]() {
+    std::weak_ptr<typename decltype(tor)::element_type> wtor = tor;
+    lt::post(ioc, [wtor, piece_idx, prio]() {
+        auto t = wtor.lock();
+        if (!t || t->is_aborted() || !t->valid_metadata()) return;
+        if (piece_idx < 0 || piece_idx >= t->torrent_file().num_pieces()) return;
         lt::piece_index_t const pi{piece_idx};
-        // need_picker() materialises a picker reflecting current have-state
-        // (e.g. a seeding torrent with have_all and no picker), so we_dont_have
-        // works even after the torrent finished.
-        if (!tor->has_picker()) tor->need_picker();
-        tor->set_piece_priority(pi, lt::dont_download);
-        tor->picker().we_dont_have(pi);
-        // Re-apply the requested priority last so the picker will (or won't)
-        // re-request the piece exactly as the caller intends.
-        tor->set_piece_priority(pi,
+        if (!t->has_picker()) t->need_picker();
+        t->set_piece_priority(pi, lt::dont_download);
+        t->picker().we_dont_have(pi);
+        t->set_piece_priority(pi,
             static_cast<lt::download_priority_t>(static_cast<std::uint8_t>(prio)));
     });
     return LT_OK;
 #else
-    // Linked against a shared libtorrent that doesn't export piece_picker /
-    // torrent internals (distro or Homebrew). Per-piece un-have isn't
-    // available, so just clear any deadline. The consequence is the documented
-    // pre-we_dont_have limitation: a seek back into an already-evicted region
-    // won't re-download (forward seek, playback and short rewind still work).
-    // reset_piece_deadline is public torrent_handle API, so this always links.
     h.reset_piece_deadline(lt::piece_index_t{piece_idx});
     return LT_OK;
 #endif
@@ -1106,6 +1119,7 @@ int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
 
 int lt_torrent_set_piece_deadline(lt_torrent tid, int piece_idx, int deadline_ms, int alert_when_ready) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     lt::deadline_flags_t flags = {};
@@ -1119,8 +1133,6 @@ int lt_torrent_set_sequential_download(lt_torrent tid, int enable) {
     WRAP_BEGIN
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
-    // The legacy set_sequential_download(bool) is deprecated in lt 2.0; drive the
-    // torrent_flags::sequential_download flag directly instead.
     if (enable)
         h.set_flags(lt::torrent_flags::sequential_download);
     else
@@ -1131,10 +1143,9 @@ int lt_torrent_set_sequential_download(lt_torrent tid, int enable) {
 
 int lt_torrent_reset_piece_deadline(lt_torrent tid, int piece_idx) {
     WRAP_BEGIN
+    if (piece_idx < 0) return set_err(LT_ERR_INVALID, "piece index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
-    // reset_piece_deadline takes the piece off the time-critical list. Public
-    // torrent_handle API, so this always links (no internals needed).
     h.reset_piece_deadline(lt::piece_index_t{piece_idx});
     return LT_OK;
     WRAP_END(LT_ERR_INTERNAL)
@@ -1151,6 +1162,7 @@ int lt_torrent_clear_piece_deadlines(lt_torrent tid) {
 
 int lt_torrent_set_file_priority(lt_torrent tid, int file_idx, int prio) {
     WRAP_BEGIN
+    if (file_idx < 0) return set_err(LT_ERR_INVALID, "file index out of range");
     auto h = get_torrent(tid);
     if (!h.is_valid()) return set_err(LT_ERR_NOT_FOUND, "torrent not found");
     if (prio < 0 || prio > 7) return set_err(LT_ERR_INVALID, "prio out of range");
@@ -1163,7 +1175,6 @@ int lt_torrent_set_file_priority(lt_torrent tid, int file_idx, int prio) {
 // ----- status & stats -----
 
 size_t lt_torrent_status_json(lt_torrent tid, char* buf, size_t cap) {
-    set_err(LT_OK, "");
     try {
         auto h = get_torrent(tid);
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return 0; }
@@ -1205,7 +1216,6 @@ int lt_session_wait_alert(lt_session sid, int timeout_ms) {
 }
 
 char* lt_session_pop_alerts_json_alloc(lt_session sid, size_t* out_len) {
-    set_err(LT_OK, "");
     try {
         auto slot = get_session(sid);
         if (!slot) { set_err(LT_ERR_NOT_FOUND, "session not found"); return nullptr; }
@@ -1242,18 +1252,33 @@ static char* parse_atp_to_json(lt::add_torrent_params const& atp, size_t* out_le
     for (auto const& t : atp.trackers) tr.push_back(t);
     j["trackers"] = std::move(tr);
     if (atp.ti) {
+        if (atp.name.empty()) j["display_name"] = atp.ti->name();
         auto const& info = atp.ti->info_section();
         j["has_metadata"]  = true;
         j["metadata_size"] = static_cast<int>(info.size());
         j["num_pieces"]    = atp.ti->num_pieces();
         j["piece_length"]  = atp.ti->piece_length();
         j["total_size"]    = atp.ti->total_size();
+        j["private"]       = atp.ti->priv();
+        auto const& fs = atp.ti->files();
+        json files = json::array();
+        for (int i = 0; i < fs.num_files(); ++i) {
+            lt::file_index_t const fi{i};
+            files.push_back({
+                {"index",  i},
+                {"path",   fs.file_path(fi)},
+                {"size",   fs.file_size(fi)},
+                {"offset", fs.file_offset(fi)},
+            });
+        }
+        j["files"] = std::move(files);
     } else {
         j["has_metadata"]  = false;
         j["metadata_size"] = 0;
         j["num_pieces"]    = 0;
         j["piece_length"]  = 0;
         j["total_size"]    = 0;
+        j["private"]       = false;
     }
     std::string s = json_dump(j);
     return alloc_string(s, out_len);
@@ -1267,6 +1292,10 @@ char* lt_parse_magnet_alloc(const char* uri, size_t* out_len) {
         lt::error_code ec;
         lt::parse_magnet_uri(uri, atp, ec);
         if (ec) { set_err_ec(LT_ERR_PARSE, ec); return nullptr; }
+        if (!atp.info_hashes.has_v1()) {
+            set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only magnets are not supported");
+            return nullptr;
+        }
         return parse_atp_to_json(atp, out_len);
     } catch (std::exception const& e) {
         set_err(LT_ERR_INTERNAL, e.what());
@@ -1278,10 +1307,15 @@ char* lt_parse_torrent_bytes_alloc(const uint8_t* buf, size_t len, size_t* out_l
     set_err(LT_OK, "");
     try {
         if (!buf || len == 0) { set_err(LT_ERR_INVALID, "empty bytes"); return nullptr; }
+        if (len > (64u << 20)) { set_err(LT_ERR_INVALID, "torrent file exceeds 64 MiB"); return nullptr; }
         lt::error_code ec;
         auto ti = parse_torrent_or_info(
             reinterpret_cast<char const*>(buf), static_cast<int>(len), ec);
         if (ec || !ti) { set_err_ec(LT_ERR_PARSE, ec); return nullptr; }
+        if (!ti->info_hashes().has_v1()) {
+            set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only torrents are not supported");
+            return nullptr;
+        }
         lt::add_torrent_params atp;
         atp.ti = ti;
         atp.info_hashes = ti->info_hashes();
@@ -1300,10 +1334,17 @@ char* lt_parse_torrent_file_alloc(const char* path, size_t* out_len) {
     set_err(LT_OK, "");
     try {
         if (!path || !*path) { set_err(LT_ERR_INVALID, "empty path"); return nullptr; }
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { set_err(LT_ERR_IO, std::string("cannot open ") + path); return nullptr; }
-        std::vector<char> buf((std::istreambuf_iterator<char>(f)), {});
-        if (buf.empty()) { set_err(LT_ERR_IO, "file is empty"); return nullptr; }
+        auto sz = f.tellg();
+        if (sz <= 0) { set_err(LT_ERR_IO, "file is empty"); return nullptr; }
+        if (sz > static_cast<std::streamoff>(64 << 20)) {
+            set_err(LT_ERR_INVALID, "torrent file exceeds 64 MiB");
+            return nullptr;
+        }
+        f.seekg(0, std::ios::beg);
+        std::vector<char> buf(static_cast<size_t>(sz));
+        if (!f.read(buf.data(), sz)) { set_err(LT_ERR_IO, "read failed"); return nullptr; }
         return lt_parse_torrent_bytes_alloc(
             reinterpret_cast<uint8_t const*>(buf.data()), buf.size(), out_len);
     } catch (std::exception const& e) {

@@ -11,8 +11,8 @@ import ServerStatus from 'components/ServerStatus'
 import ExportLibrary from 'components/ExportLibrary'
 import ImportLibrary from 'components/ImportLibrary'
 import { memo } from 'react'
-import CheckIcon from '@material-ui/icons/Check'
-import ClearIcon from '@material-ui/icons/Clear'
+import ViewListIcon from '@material-ui/icons/ViewList'
+import LabelOffIcon from '@material-ui/icons/LabelOff'
 import { TORRENT_CATEGORIES } from 'components/categories'
 import FilterByCategory from 'components/FilterByCategory'
 
@@ -40,7 +40,7 @@ const Sidebar = ({ isDrawerOpen, isOffline, isLoading, setGlobalFilterCategory }
           key='all'
           categoryKey='all'
           categoryName={t('All')}
-          icon={<CheckIcon />}
+          icon={<ViewListIcon />}
           setGlobalFilterCategory={setGlobalFilterCategory}
         />
         {TORRENT_CATEGORIES.map(category => (
@@ -56,7 +56,7 @@ const Sidebar = ({ isDrawerOpen, isOffline, isLoading, setGlobalFilterCategory }
           key='uncategorized'
           categoryKey=''
           categoryName={t('Uncategorized')}
-          icon={<ClearIcon />}
+          icon={<LabelOffIcon />}
           setGlobalFilterCategory={setGlobalFilterCategory}
         />
       </List>

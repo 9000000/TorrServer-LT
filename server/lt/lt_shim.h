@@ -136,6 +136,9 @@ int        lt_session_destroy(lt_session s);
  * piece count). When this bitmap is non-empty the shim also sets
  * torrent_flags::no_verify_files so libtorrent skips re-hashing on add.
  */
+#define LT_ADD_PAUSED         (1 << 0)
+#define LT_ADD_DONT_DOWNLOAD  (1 << 1)
+
 lt_torrent lt_session_add_torrent(
     lt_session s,
     const char* link,

@@ -90,10 +90,11 @@ jobs:
         working-directory: server
         env:
           CGO_ENABLED: '1'
+          CGO_CXXFLAGS: '-DTSL_HAVE_LT_INTERNALS'
           PKG_CONFIG_PATH: ${{ github.workspace }}/_deps/linux-amd64/lib/pkgconfig
           PKG_CONFIG_LIBDIR: ${{ github.workspace }}/_deps/linux-amd64/lib/pkgconfig
           CGO_LDFLAGS: -L${{ github.workspace }}/_deps/linux-amd64/lib
-        run: go test -count=1 -timeout 180s ./lt/ ./torr/ ./torr/storage/torrstor/ ./dlna/
+        run: go test -count=1 -timeout 240s ./...
 
       - name: Probe --version
         if: matrix.target == 'linux-amd64'
@@ -122,6 +123,15 @@ jobs:
           pattern: TorrServer-LT-*
           path: dist
           merge-multiple: true
+
+      - name: Stage multi-arch binaries for Dockerfile.runtime
+        run: |
+          set -euo pipefail
+          mkdir -p dist/amd64 dist/arm64 dist/armv7
+          cp -f dist/TorrServer-LT-linux-amd64 dist/amd64/torrserver
+          cp -f dist/TorrServer-LT-linux-arm64 dist/arm64/torrserver
+          cp -f dist/TorrServer-LT-linux-armv7 dist/armv7/torrserver
+          chmod +x dist/amd64/torrserver dist/arm64/torrserver dist/armv7/torrserver
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
