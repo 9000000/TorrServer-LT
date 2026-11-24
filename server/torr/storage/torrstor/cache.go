@@ -1755,13 +1755,19 @@ func (c *Cache) evictPass() (evictedAny bool) {
 	evictable := func(p *Piece) bool { return p.SizeBytes() > 0 && p.Complete() }
 
 	nowU := time.Now().Unix()
+	overCap := used > cap
 	for _, p := range pieces {
 		if p.SizeBytes() <= 0 || p.Complete() || pieceInRanges(p.Id, protect) {
 			continue
 		}
-		grace := int64(abandonEvictSec)
-		if p.SizeBytes() >= c.PieceLength {
-			grace = hashGraceSec
+		// Only reap incomplete pieces aggressively (abandonEvictSec = 4s) under
+		// memory pressure. When well below CacheSize (e.g. 24 MB / 1024 MB),
+		// keep partial pieces for the full hashGraceSec (30s): wiping a live
+		// slow-swarm partial while libtorrent still tracks its blocks in
+		// piece_picker::m_downloads causes hash_failed when remaining blocks land.
+		grace := int64(hashGraceSec)
+		if overCap && p.SizeBytes() < c.PieceLength {
+			grace = int64(abandonEvictSec)
 		}
 		if nowU-p.Accessed() > grace {
 			if h := c.handle.Load(); h != nil {

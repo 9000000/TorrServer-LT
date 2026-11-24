@@ -74,11 +74,14 @@ typedef int64_t lt_torrent;
 #define LT_ALERT_PERFORMANCE    0x00000200u  /*  9_bit */
 #define LT_ALERT_DHT            0x00000400u  /* 10_bit */
 #define LT_ALERT_PIECE_PROGRESS 0x00400000u  /* 22_bit: piece_finished, hash_failed */
-#define LT_ALERT_BLOCK_PROGRESS 0x01000000u  /* 24_bit: block_finished */
+#define LT_ALERT_BLOCK_PROGRESS 0x01000000u  /* 24_bit: block_downloading, block_finished (opt-in) */
+/* LT_ALERT_BLOCK_PROGRESS is omitted from the default mask: responsive block
+ * serving wakes readers directly from disk cb_write, whereas block alerts fire
+ * twice per 16 KiB block (~131k JSON alerts/GiB) for zero consumers. */
 #define LT_ALERT_DEFAULT (LT_ALERT_ERROR | LT_ALERT_PEER | LT_ALERT_STORAGE | \
                           LT_ALERT_TRACKER | LT_ALERT_CONNECT | LT_ALERT_STATUS | \
                           LT_ALERT_PERFORMANCE | LT_ALERT_DHT | \
-                          LT_ALERT_PIECE_PROGRESS | LT_ALERT_BLOCK_PROGRESS)
+                          LT_ALERT_PIECE_PROGRESS)
 
 /* ----- error reporting ----- */
 /* Thread-local last error message. Valid until the next lt_* call from

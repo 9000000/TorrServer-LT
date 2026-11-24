@@ -349,7 +349,11 @@ func (bt *BTServer) refreshUPnP(stop <-chan struct{}) {
 
 func (bt *BTServer) handleAlert(a *lt.Alert) {
 	if settings.BTsets() != nil && settings.BTsets().EnableDebug && a.Type != "" {
-		log.Printf("lt: %s — %s", a.Type, a.Message)
+		// Suppress per-16KB-block progress chatter even when a caller enables
+		// LT_ALERT_BLOCK_PROGRESS; piece_finished + torrstor events carry progress.
+		if a.Type != "block_downloading" && a.Type != "block_finished" {
+			log.Printf("lt: %s — %s", a.Type, a.Message)
+		}
 	} else if (a.Category&1) != 0 || strings.Contains(a.Type, "error") || strings.Contains(a.Type, "failed") {
 		// Suppress noisy tracker alerts (dead / timeout / unreachable / unregistered trackers) in non-debug mode.
 		if !strings.HasPrefix(a.Type, "tracker_") {

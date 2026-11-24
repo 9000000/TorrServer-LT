@@ -11,6 +11,7 @@ import (
 	"server/log"
 	"server/settings"
 	"server/torr/state"
+	storageState "server/torr/storage/state"
 	"server/torr/storage/torrstor"
 )
 
@@ -57,11 +58,56 @@ const preloadConnections = 200
 const headDeadlineLeadPieces = 8
 
 // stragglerEscalatePieces is how few gate pieces may remain before the wait loop deadlines
-// the still-incomplete ones (deadline 0) to force libtorrent's end-game re-request of their
-// last blocks. Kept small so only the final stragglers are made time-critical — never the
-// bulk head (that floods the queue, see headDeadlineLeadPieces) — which is exactly the
-// situation a deadline is safe and needed: a flaky peer stalling a near-complete piece.
+// the still-incomplete ones to force libtorrent's end-game re-request of their last blocks.
+// Kept small so only the final stragglers are made time-critical — never the bulk head
+// (that floods the queue, see headDeadlineLeadPieces).
 const stragglerEscalatePieces = 8
+
+// preloadStragglerPieces returns the incomplete pieces to escalate to urgent
+// ascending deadlines once a preload is down to its final stragglers.
+//
+// Rules:
+//  1. Require at least one piece in the active phase to have completed (done > 0)
+//     before escalating: when gateCount <= stragglerEscalatePieces (e.g. a 3%
+//     preload with 8 MB pieces = 5 pieces), escalating at done == 0 would flatten
+//     every piece to deadline 0 on the very first 200ms tick, breaking the initial
+//     tail->head order and the two-phase probe boundary.
+//  2. During two-phase preload before ffprobe has run (twoPhase && !probed),
+//     scope escalation strictly to probeHead + tailExtra (never escalate phase-2
+//     head pieces early).
+//  3. Order tail pieces first, then head pieces, so ascending deadlines preserve
+//     tail -> head priority during straggler recovery.
+func preloadStragglerPieces(
+	headPieces, probeHeadPieces, tailExtraPieces []int,
+	twoPhase, probed bool,
+	snap map[int]storageState.ItemState,
+) []int {
+	activeHead := headPieces
+	if twoPhase && !probed {
+		activeHead = probeHeadPieces
+	}
+	totalTargets := len(tailExtraPieces) + len(activeHead)
+	if totalTargets == 0 {
+		return nil
+	}
+	done := 0
+	missing := make([]int, 0, totalTargets)
+	check := func(list []int) {
+		for _, p := range list {
+			if st, ok := snap[p]; ok && st.Completed {
+				done++
+			} else {
+				missing = append(missing, p)
+			}
+		}
+	}
+	check(tailExtraPieces)
+	check(activeHead)
+	if done == 0 || len(missing) == 0 || len(missing) > stragglerEscalatePieces {
+		return nil
+	}
+	return missing
+}
 
 // preloadWarmGrace is how long the &preload path keeps the swarm hot and prefetches
 // a readahead window PAST the head after the gate releases, bridging the gap until
@@ -448,20 +494,17 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 			got += sz
 		}
 
-		// End-game the final stragglers: once only a few gate pieces remain, deadline each
-		// still-incomplete one (deadline 0 = most urgent) so libtorrent re-requests its
-		// outstanding blocks from every peer. The head past the racing lead carries NO
-		// deadline (deadlining the whole head floods the time-critical queue — see
-		// headDeadlineLeadPieces), so a flaky peer can leave a piece at e.g. 124/128 blocks
-		// for a minute, holding the gate — observed as "switched series and the stream
-		// didn't start". Only a handful of pieces are deadlined here (rem <= a few), so it
-		// can't flood; refreshed each tick until they land. Cheap no-op once done.
-		if rem := gateCount - done; rem > 0 && rem <= stragglerEscalatePieces {
-			for _, p := range gatePieces {
-				if st, ok := snap[p]; !ok || !st.Completed {
-					_ = lh.SetPieceDeadline(p, 0, false)
-					cache.TrackDeadline(p)
-				}
+		// End-game the final stragglers: once at least one piece in the active phase
+		// has completed and only a few remain (<= stragglerEscalatePieces), refresh
+		// ascending deadlines (tail first, then head) so libtorrent races their final
+		// blocks without flattening a small preload at done==0 or breaking twoPhase.
+		if stragglers := preloadStragglerPieces(
+			headPieces, headPieces[:probeHeadCount], gatePieces[headCount:],
+			twoPhase, probed, snap,
+		); len(stragglers) > 0 {
+			for i, p := range stragglers {
+				_ = lh.SetPieceDeadline(p, i*10, false)
+				cache.TrackDeadline(p)
 			}
 		}
 

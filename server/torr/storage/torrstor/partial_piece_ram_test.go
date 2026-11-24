@@ -3,6 +3,7 @@ package torrstor
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"server/settings"
 )
@@ -49,5 +50,51 @@ func TestPartialPieceRAMAccounting(t *testing.T) {
 	if used > capBytes {
 		t.Fatalf("eviction left %d MiB allocated in RAM, exceeding %d MiB capacity",
 			used>>20, capBytes>>20)
+	}
+}
+
+func TestEvictPass_KeepsRecentIncompletePieceUnderBudget(t *testing.T) {
+	old := settings.BTsets()
+	settings.StoreBTsets(&settings.BTSets{CacheSize: 512 << 20})
+	t.Cleanup(func() { settings.StoreBTsets(old) })
+
+	s := NewStorage()
+	h := mkHash(0x96)
+	const pieceLength = 8 << 20
+	s.callbackOpen(96, h, 20, pieceLength)
+	c := s.CacheByHash(h)
+	t.Cleanup(func() { s.callbackClose(96) })
+
+	block := bytes.Repeat([]byte{0x5a}, pieceBlockSize)
+	if _, err := c.writePiece(3, 0, block); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate 10s idle (> abandonEvictSec=4s, < hashGraceSec=30s) while well
+	// under CacheSize (8 MiB << 512 MiB): incomplete piece must NOT be wiped,
+	// because libtorrent still tracks its partial blocks in piece_picker.
+	c.mu.RLock()
+	p := c.pieces[3]
+	c.mu.RUnlock()
+	p.accessed.Store(time.Now().Unix() - (abandonEvictSec + 6))
+
+	c.evictPass()
+
+	c.mu.RLock()
+	_, stillThere := c.pieces[3]
+	c.mu.RUnlock()
+	if !stillThere {
+		t.Fatal("evictPass wiped a 10s-old incomplete piece while well under CacheSize")
+	}
+
+	// Once idle past hashGraceSec (30s), genuinely abandoned partial is reaped.
+	p.accessed.Store(time.Now().Unix() - (hashGraceSec + 5))
+	c.evictPass()
+
+	c.mu.RLock()
+	_, afterGrace := c.pieces[3]
+	c.mu.RUnlock()
+	if afterGrace {
+		t.Fatal("evictPass should reap an incomplete piece idle past hashGraceSec")
 	}
 }
