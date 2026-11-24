@@ -1291,7 +1291,7 @@ int lt_session_wait_alert(lt_session sid, int timeout_ms) {
     if (!slot) return set_err(LT_ERR_NOT_FOUND, "session not found");
     std::lock_guard<std::mutex> lk(slot->pump_mu);
     if (timeout_ms < 0) timeout_ms = 1000 * 60 * 60; // cap at 1h
-    auto* a = slot->s->wait_for_alert(std::chrono::milliseconds(timeout_ms));
+    auto a = slot->s->wait_for_alert(std::chrono::milliseconds(timeout_ms));
     return a ? 1 : 0;
     WRAP_END(LT_ERR_INTERNAL)
 }
