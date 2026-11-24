@@ -1,6 +1,7 @@
 package torr
 
 import (
+	"strings"
 	"testing"
 
 	"server/lt"
@@ -100,5 +101,35 @@ func TestApplyProxyConfig_SOCKS4A_ResolvesViaProxy(t *testing.T) {
 	// default mode = tracker
 	if cfg["proxy_tracker_connections"] != true {
 		t.Fatal("empty mode should default to tracker")
+	}
+}
+
+// TestBuildSessionConfig_AllSettingsRecognised verifies every settings_pack key
+// emitted by buildSessionConfig (+ applyProxyConfig) resolves cleanly via
+// lt::setting_by_name() in the linked libtorrent without unknown/bad-value warnings.
+func TestBuildSessionConfig_AllSettingsRecognised(t *testing.T) {
+	withArgs(t, settings.ExecArgs{
+		ProxyURL:  "socks5h://alice:secret@127.0.0.1:1080",
+		ProxyMode: "full",
+	})
+	cfg, err := buildSessionConfig()
+	if err != nil {
+		t.Fatalf("buildSessionConfig: %v", err)
+	}
+	// Keep the test offline and ephemeral-port safe on Windows/CI.
+	cfg["listen_interfaces"] = "127.0.0.1:0"
+	cfg["enable_dht"] = false
+	cfg["enable_lsd"] = false
+	cfg["enable_upnp"] = false
+	cfg["enable_natpmp"] = false
+
+	sess, err := lt.NewSession(cfg)
+	if err != nil {
+		t.Fatalf("lt.NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	if warn := lt.LastErrorMessage(); strings.Contains(warn, "settings warnings:") {
+		t.Fatalf("libtorrent rejected settings from buildSessionConfig: %s", warn)
 	}
 }

@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -100,6 +101,13 @@ inline lt::storage_error make_io_error(char const* op) {
     return se;
 }
 
+inline lt::storage_error make_aborted_error() {
+    lt::storage_error se;
+    se.ec = lt::error_code(boost::system::errc::operation_canceled, lt::system_category());
+    se.operation = lt::operation_t::partfile_read;
+    return se;
+}
+
 inline std::string sha1_raw_from(lt::sha1_hash const& h) {
     return std::string(reinterpret_cast<char const*>(h.data()), 20);
 }
@@ -130,10 +138,15 @@ constexpr lt::status_t tsl_status_ok = lt::status_t::no_error;
 namespace {
 
 struct storage_state {
-    std::shared_ptr<lt::file_storage const> files;
-    int          num_pieces   = 0;
-    int          piece_length = 0;
-    lt::sha1_hash info_hash;
+    // On libtorrent >= 2.1.3 (PR #8989), `owner` keeps torrent_info (and thus
+    // immutable `p.files`) alive without retaining aux::torrent, so we store
+    // `owner` + a non-owning pointer instead of deep-copying file_storage.
+    std::shared_ptr<void>                   owner;
+    std::shared_ptr<lt::file_storage const> owned_files;
+    lt::file_storage const*                 files        = nullptr;
+    int                                     num_pieces   = 0;
+    int                                     piece_length = 0;
+    lt::sha1_hash                           info_hash;
 };
 
 // One queued piece-hash request handed to the hashing thread pool.
@@ -141,6 +154,7 @@ struct hash_job {
     lt::storage_index_t       s;
     lt::piece_index_t         piece;
     lt::span<lt::sha256_hash> v2;
+    lt::disk_job_flags_t      flags;
     std::function<void(lt::piece_index_t, lt::sha1_hash const&, lt::storage_error const&)> handler;
 };
 
@@ -178,19 +192,38 @@ public:
             hash_threads_.emplace_back([this]{ hash_worker(); });
     }
 
-    ~tsl_disk_io() override { stop_hash_pool(); }
+    ~tsl_disk_io() override {
+        stop_hash_pool();
+        std::lock_guard<std::mutex> lk(pool_mu_);
+        for (char* raw : read_pool_) std::free(raw);
+        read_pool_.clear();
+    }
 
     // ----- storage lifecycle -----
 
     lt::storage_holder new_torrent(lt::storage_params const& p,
-                                   std::shared_ptr<void> const&) override
+                                   std::shared_ptr<void> const& owner) override
     {
         int64_t idx = next_id_++;
 
         storage_state ss;
-        ss.files = std::make_shared<lt::file_storage>(p.files);
-        ss.num_pieces = ss.files->num_pieces();
-        ss.piece_length = ss.files->piece_length();
+#if LIBTORRENT_VERSION_NUM >= 20103
+        if (owner) {
+            ss.owner = owner;
+            ss.files = &p.files;
+        } else {
+            ss.owned_files = std::make_shared<lt::file_storage>(p.files);
+            ss.files = ss.owned_files.get();
+        }
+#else
+        (void)owner;
+        ss.owned_files = std::make_shared<lt::file_storage>(p.files);
+        ss.files = ss.owned_files.get();
+#endif
+        int const num_pieces = ss.files->num_pieces();
+        int const piece_length = ss.files->piece_length();
+        ss.num_pieces = num_pieces;
+        ss.piece_length = piece_length;
         ss.info_hash = p.info_hash;
 
         {
@@ -200,7 +233,7 @@ public:
 
         auto raw = sha1_raw_from(p.info_hash);
         cb_.open(idx, reinterpret_cast<uint8_t const*>(raw.data()),
-                 ss.num_pieces, ss.piece_length);
+                 num_pieces, piece_length);
 
         auto storage_idx = lt::storage_index_t(static_cast<int>(idx));
         return lt::storage_holder(storage_idx, *this);
@@ -224,7 +257,7 @@ public:
                     std::function<void(lt::disk_buffer_holder, lt::storage_error const&)> handler,
                     lt::disk_job_flags_t /*flags*/ = {}) override
     {
-        char* buf = static_cast<char*>(std::malloc(static_cast<size_t>(r.length)));
+        char* buf = alloc_read_buffer(r.length);
         if (!buf) {
             auto err = make_io_error("read");
             lt::post(io_, [h = std::move(handler), err]() mutable {
@@ -293,12 +326,12 @@ public:
     void async_hash(lt::storage_index_t s,
                     lt::piece_index_t piece,
                     lt::span<lt::sha256_hash> v2,
-                    lt::disk_job_flags_t /*flags*/,
+                    lt::disk_job_flags_t flags,
                     std::function<void(lt::piece_index_t, lt::sha1_hash const&, lt::storage_error const&)> handler) override
     {
         // Hand the read + SHA-1 (and v2 SHA-256 block hashes for hybrid torrents)
         // to a worker so it runs off the network thread.
-        hash_job job{s, piece, v2, std::move(handler)};
+        hash_job job{s, piece, v2, flags, std::move(handler)};
         {
             std::lock_guard<std::mutex> lk(hash_mu_);
             if (!hash_stop_ && !hash_threads_.empty()) {
@@ -341,7 +374,7 @@ public:
     }
 
     void async_release_files(lt::storage_index_t, std::function<void()> handler) override {
-        lt::post(io_, std::move(handler));
+        if (handler) lt::post(io_, std::move(handler));
     }
 
     void async_delete_files(lt::storage_index_t s,
@@ -374,8 +407,46 @@ public:
         });
     }
 
-    void async_stop_torrent(lt::storage_index_t, std::function<void()> handler) override {
-        lt::post(io_, std::move(handler));
+    void async_stop_torrent(lt::storage_index_t s, std::function<void()> handler) override {
+        // Cancel queued (not-yet-running) hash jobs for this storage so pausing
+        // or removing a torrent doesn't burn CPU hashing 4-16 MiB pieces nobody
+        // needs anymore. Handlers are posted onto io_ BEFORE `handler` so every
+        // captured torrent reference still releases on the network thread.
+        std::vector<hash_job> cancelled_v1;
+        std::vector<hash2_job> cancelled_v2;
+        {
+            std::lock_guard<std::mutex> lk(hash_mu_);
+            for (auto it = hash_queue_.begin(); it != hash_queue_.end(); ) {
+                if (it->s == s) {
+                    cancelled_v1.push_back(std::move(*it));
+                    it = hash_queue_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = hash2_queue_.begin(); it != hash2_queue_.end(); ) {
+                if (it->s == s) {
+                    cancelled_v2.push_back(std::move(*it));
+                    it = hash2_queue_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        if (!cancelled_v1.empty() || !cancelled_v2.empty()) {
+            auto const err = make_aborted_error();
+            for (auto& j : cancelled_v1) {
+                lt::post(io_, [h = std::move(j.handler), piece = j.piece, err]() mutable {
+                    h(piece, lt::sha1_hash{}, err);
+                });
+            }
+            for (auto& j : cancelled_v2) {
+                lt::post(io_, [h = std::move(j.handler), piece = j.piece, err]() mutable {
+                    h(piece, lt::sha256_hash{}, err);
+                });
+            }
+        }
+        if (handler) lt::post(io_, std::move(handler));
     }
 
     void async_set_file_priority(lt::storage_index_t,
@@ -402,17 +473,77 @@ public:
     void settings_updated() override {}
 
     // ----- buffer_allocator_interface -----
+    //
+    // Lightweight 16 KiB freelist for upload blocks (aligned with libtorrent
+    // 2.1.3 PR #8999's disk_buffer_pool speedup, tailored to our RAM-cache
+    // delegator). A 16-byte prefix preserves max_align_t alignment and tags
+    // standard <=16 KiB blocks vs rare oversized reads, while free_multiple_buffers
+    // acquires pool_mu_ once for the whole peer-send batch. Lazy-allocated: costs
+    // 0 bytes when DisableUpload is active.
 
-    void free_disk_buffer(char* buf) override { std::free(buf); }
+    void free_disk_buffer(char* buf) override {
+        if (!buf) return;
+        char* raw = buf - kPoolHeaderBytes;
+        std::uint32_t tag = 0;
+        std::memcpy(&tag, raw, sizeof(tag));
+        if (tag == kTagPooled) {
+            std::lock_guard<std::mutex> lk(pool_mu_);
+            if (read_pool_.size() < kPoolMaxBlocks) {
+                read_pool_.push_back(raw);
+                return;
+            }
+        }
+        std::free(raw);
+    }
 
 #if LIBTORRENT_VERSION_NUM >= 20100
     // New pure virtual in 2.1: batched frees from the peer connection loop.
     void free_multiple_buffers(lt::span<char*> bufs) override {
-        for (char* b : bufs) std::free(b);
+        std::lock_guard<std::mutex> lk(pool_mu_);
+        for (char* buf : bufs) {
+            if (!buf) continue;
+            char* raw = buf - kPoolHeaderBytes;
+            std::uint32_t tag = 0;
+            std::memcpy(&tag, raw, sizeof(tag));
+            if (tag == kTagPooled && read_pool_.size() < kPoolMaxBlocks) {
+                read_pool_.push_back(raw);
+            } else {
+                std::free(raw);
+            }
+        }
     }
 #endif
 
 private:
+    static constexpr std::size_t   kPoolBlockSize   = 0x4000;
+    static constexpr std::size_t   kPoolHeaderBytes = 16;
+    static constexpr std::size_t   kPoolMaxBlocks   = 256; // <= 4 MiB cached
+    static constexpr std::uint32_t kTagPooled       = 0x54534C31u;
+    static constexpr std::uint32_t kTagOversized    = 0x54534C30u;
+
+    char* alloc_read_buffer(int length) {
+        std::size_t const req = length > 0 ? static_cast<std::size_t>(length) : 1u;
+        if (req <= kPoolBlockSize) {
+            {
+                std::lock_guard<std::mutex> lk(pool_mu_);
+                if (!read_pool_.empty()) {
+                    char* raw = read_pool_.back();
+                    read_pool_.pop_back();
+                    return raw + kPoolHeaderBytes;
+                }
+            }
+            char* raw = static_cast<char*>(std::malloc(kPoolHeaderBytes + kPoolBlockSize));
+            if (!raw) return nullptr;
+            std::uint32_t const tag = kTagPooled;
+            std::memcpy(raw, &tag, sizeof(tag));
+            return raw + kPoolHeaderBytes;
+        }
+        char* raw = static_cast<char*>(std::malloc(kPoolHeaderBytes + req));
+        if (!raw) return nullptr;
+        std::uint32_t const tag = kTagOversized;
+        std::memcpy(raw, &tag, sizeof(tag));
+        return raw + kPoolHeaderBytes;
+    }
     // ----- hashing thread pool -----
 
     // run_hash does the actual work: read the piece out of the Go cache and
@@ -473,9 +604,12 @@ private:
                     job.v2[idx] = h2.final();
                 }
             }
-            lt::hasher h;
-            h.update(lt::span<char const>(data.data(), piece_actual));
-            auto digest = h.final();
+            lt::sha1_hash digest{};
+            if (job.v2.empty() || bool(job.flags & lt::disk_interface::v1_hash)) {
+                lt::hasher h;
+                h.update(lt::span<char const>(data.data(), piece_actual));
+                digest = h.final();
+            }
             lt::post(io_, [hd = std::move(job.handler), piece = job.piece, digest]() mutable {
                 hd(piece, digest, lt::storage_error{});
             });
@@ -579,6 +713,9 @@ private:
     std::shared_mutex                              map_mu_;
     std::unordered_map<int64_t, storage_state>     storages_;
     std::atomic<int64_t>                           next_id_{1};
+
+    std::mutex                                     pool_mu_;
+    std::vector<char*>                             read_pool_;
 
     // hashing thread pool (see the constructor for sizing)
     std::vector<std::thread> hash_threads_;

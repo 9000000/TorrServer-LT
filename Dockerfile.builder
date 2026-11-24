@@ -13,10 +13,10 @@
 # Real wiring of session/torrent/storage lands in later milestones.
 
 # Global build arguments (can be overridden via Docker Compose `build.args`)
-ARG LT_TAG=v2.1.2
+ARG LT_TAG=v2.1.3
 ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.20
-ARG TS_VERSION=MatriX.150.LT-1.2.8
+ARG TS_VERSION=MatriX.150.LT-1.2.9
 ARG TS_PORT=8090
 
 ############################
@@ -36,16 +36,17 @@ RUN git clone --branch ${LT_TAG} --depth 1 --recurse-submodules \
         https://github.com/arvidn/libtorrent.git
 
 WORKDIR /src/libtorrent/build
-# deprecated-functions=ON (ABI v2): the shim's torrent_info-from-buffer path
-# uses ctors that libtorrent 2.1 marks deprecated under ABI < 4; OFF (= newest
-# ABI) would remove them. webtorrent=OFF avoids unnecessary libdatachannel
-# dependencies and fixes static linking undefined reference errors (rtc::*).
+# deprecated-functions=ON keeps ABI v2 parity with the b2 release builds;
+# webtorrent=ON links libdatachannel/usrsctp/libjuice statically; super-seeding
+# and share-mode (new toggles in 2.1.3) are disabled as unused by streaming.
 RUN cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -Dstatic_runtime=ON \
         -Ddeprecated-functions=ON \
         -Dwebtorrent=ON \
+        -Dsuper-seeding=OFF \
+        -Dshare-mode=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
         -Dpython-bindings=OFF \

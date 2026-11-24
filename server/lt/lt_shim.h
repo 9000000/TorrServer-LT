@@ -98,7 +98,7 @@ void  lt_free(void* p);
 /* "MatriX.LT-001" (or whatever the shim build was tagged with) */
 size_t lt_shim_version(char* buf, size_t cap);
 
-/* libtorrent version, e.g. "2.0.10.0" */
+/* libtorrent version, e.g. "2.1.3.0" */
 size_t lt_engine_version(char* buf, size_t cap);
 
 /* ----- session lifecycle ----- */
@@ -114,6 +114,11 @@ int        lt_session_apply_settings(lt_session s, const char* settings_json);
  * unknown name, LT_ERR_INVALID for a non-int setting. Used to verify a setting
  * was actually applied. */
 int        lt_session_get_setting_int(lt_session s, const char* name, int64_t* out);
+
+/* Read back a bool settings_pack value from the live session by name (e.g.
+ * "announce_to_all_tiers"). Writes 0 or 1 to *out. Returns LT_ERR_NOT_FOUND for
+ * an unknown name, LT_ERR_INVALID for a non-bool setting. */
+int        lt_session_get_setting_bool(lt_session s, const char* name, int* out);
 
 /* P2P-format text (one range per line: desc:from-to or desc:single).
  * Empty string clears the filter. */

@@ -430,7 +430,9 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		// throughput without tripping peer anti-flood limits.
 		"strict_end_game_mode":      true,  // fetch the final buffer pieces from many peers
 		"prioritize_partial_pieces": false, // prefer finishing the reader's window in order
-		"announce_to_all_tiers":     true,  // hit every tracker tier for peers fast
+		// libtorrent 2.1.3 fixed the settings_pack name swap between these two
+		// flags; enabling both hits every tracker across every tier for fast ramp-up.
+		"announce_to_all_tiers":     true,
 		"announce_to_all_trackers":  true,
 		"min_announce_interval":     30,
 		"max_suggest_pieces":        50,
@@ -444,7 +446,7 @@ func buildSessionConfig() (lt.SessionConfig, error) {
 		// instead of riding one fast peer for 3s. Field A/B: the post-seek swarm
 		// split and the target's trickle-in were the whole resume-time gap.
 		"request_queue_time":           1,
-		"max_out_request_queue":        1500, // cap outstanding block requests per peer
+		"max_out_request_queue":        1500, // cap outstanding block requests per peer (libtorrent 2.1.3+ default)
 		"max_allowed_in_request_queue": 2000, // libtorrent default
 		"send_buffer_watermark":        500 * 1024,
 		"send_buffer_watermark_factor": 50,

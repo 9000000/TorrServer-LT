@@ -7,10 +7,10 @@
 #
 
 # Global build arguments (can be overridden via Docker Compose `build.args`)
-ARG LT_TAG=v2.1.2
+ARG LT_TAG=v2.1.3
 ARG GO_VERSION=1.25
 ARG ALPINE_VERSION=3.20
-ARG TS_VERSION=MatriX.150.LT-1.2.8
+ARG TS_VERSION=MatriX.150.LT-1.2.9
 ARG TS_PORT=8090
 
 ############################
@@ -36,6 +36,8 @@ RUN cmake .. \
         -Dstatic_runtime=ON \
         -Ddeprecated-functions=ON \
         -Dwebtorrent=ON \
+        -Dsuper-seeding=OFF \
+        -Dshare-mode=OFF \
         -Dbuild_examples=OFF \
         -Dbuild_tests=OFF \
         -Dpython-bindings=OFF \

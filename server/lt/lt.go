@@ -128,11 +128,18 @@ func lastError() error {
 // ----- versions -----
 
 // Version returns the libtorrent version string the shim was compiled against,
-// e.g. "2.0.10.0".
+// e.g. "2.1.3.0".
 func Version() string {
 	return cStringBuf(func(buf *C.char, cap C.size_t) C.size_t {
 		return C.lt_engine_version(buf, cap)
 	}, 32)
+}
+
+// LastErrorMessage returns the diagnostic message recorded by the most recent
+// shim call (including non-fatal settings warnings when NewSession or
+// ApplySettings succeeds with unknown/bad keys).
+func LastErrorMessage() string {
+	return C.GoString(C.lt_last_error())
 }
 
 // ShimVersion returns the TorrServer-LT shim's own version tag.
@@ -262,6 +269,22 @@ func (s *Session) SettingInt(name string) (int64, error) {
 		return 0, err
 	}
 	return int64(out), nil
+}
+
+// SettingBool reads back a bool settings_pack value from the live session by
+// name (e.g. "announce_to_all_tiers").
+func (s *Session) SettingBool(name string) (bool, error) {
+	sid := s.sid()
+	if sid == 0 {
+		return false, ErrInvalid
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	var out C.int
+	if err := codeToErr(C.lt_session_get_setting_bool(sid, cName, &out)); err != nil {
+		return false, err
+	}
+	return out != 0, nil
 }
 
 // SetIPFilter installs an IP filter from a P2P-format text block.

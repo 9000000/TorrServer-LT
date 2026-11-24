@@ -27,6 +27,9 @@
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/torrent_status.hpp>
 #include <libtorrent/version.hpp>
+#if LIBTORRENT_VERSION_NUM >= 20100
+#include <libtorrent/load_torrent.hpp>
+#endif
 
 // Internal headers for lt_torrent_we_dont_have: poking the piece_picker to
 // drop a "have" piece must happen on the session network thread. These symbols
@@ -54,6 +57,7 @@
 // headers have been seen so the session_params type is unambiguous.
 extern void tsl_install_disk_io_on(libtorrent::session_params& params);
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -182,6 +186,14 @@ inline std::vector<std::string> split_csv(std::string const& csv) {
     }
     if (!cur.empty()) out.push_back(std::move(cur));
     return out;
+}
+
+inline lt::file_storage const& torrent_files(lt::torrent_info const& ti) {
+#if LIBTORRENT_VERSION_NUM >= 20100
+    return ti.layout();
+#else
+    return ti.files();
+#endif
 }
 
 } // namespace
@@ -575,6 +587,7 @@ lt_session lt_session_new(const char* settings_json) {
 }
 
 int lt_session_apply_settings(lt_session id, const char* settings_json) {
+    set_err(LT_OK, "");
     WRAP_BEGIN
     auto slot = get_session(id);
     if (!slot) return set_err(LT_ERR_NOT_FOUND, "session not found");
@@ -604,6 +617,21 @@ int lt_session_get_setting_int(lt_session id, const char* name, int64_t* out) {
         return set_err(LT_ERR_INVALID, "not an int setting");
     lt::settings_pack sp = slot->s->get_settings();
     if (out) *out = sp.get_int(sid);
+    return LT_OK;
+    WRAP_END(LT_ERR_INTERNAL)
+}
+
+int lt_session_get_setting_bool(lt_session id, const char* name, int* out) {
+    WRAP_BEGIN
+    auto slot = get_session(id);
+    if (!slot) return set_err(LT_ERR_NOT_FOUND, "session not found");
+    if (!name || !*name) return set_err(LT_ERR_INVALID, "empty setting name");
+    int sid = lt::setting_by_name(name);
+    if (sid < 0) return set_err(LT_ERR_NOT_FOUND, "unknown setting");
+    if ((sid & lt::settings_pack::type_mask) != lt::settings_pack::bool_type_base)
+        return set_err(LT_ERR_INVALID, "not a bool setting");
+    lt::settings_pack sp = slot->s->get_settings();
+    if (out) *out = sp.get_bool(sid) ? 1 : 0;
     return LT_OK;
     WRAP_END(LT_ERR_INTERNAL)
 }
@@ -663,24 +691,64 @@ int lt_session_destroy(lt_session id) {
 // info-dict. The bare form is what lt_torrent_metadata_alloc returns
 // (ti->info_section()) and what legacy anacrolix-era TorrServer DB records
 // store as InfoBytes, so round-tripping metadata through the DB must accept
-// it: wrap it into a minimal metainfo dict and re-parse. On failure returns
-// nullptr with ec holding the original (full-metainfo) parse error.
-static std::shared_ptr<lt::torrent_info> parse_torrent_or_info(
-    char const* buf, int len, lt::error_code& ec)
+// it: wrap it into a minimal metainfo dict and re-parse. On libtorrent 2.1+
+// uses load_torrent_buffer() (non-deprecated, preserves tracker tiers/sources,
+// web seeds, and DHT nodes); on failure returns false with ec holding the
+// original (full-metainfo) parse error.
+static bool load_torrent_or_info(
+    char const* buf, size_t len, lt::add_torrent_params& out, lt::error_code& ec)
 {
     ec.clear();
-    auto ti = std::make_shared<lt::torrent_info>(buf, len, ec);
-    if (!ec) return ti;
+#if LIBTORRENT_VERSION_NUM >= 20100
+    lt::load_torrent_limits limits;
+    limits.max_buffer_size = 64 * 1024 * 1024;
+    out = lt::load_torrent_buffer(
+        lt::span<char const>(buf, static_cast<std::ptrdiff_t>(len)), ec, limits);
+    if (!ec && out.ti) return true;
+
     std::string wrapped;
-    wrapped.reserve(static_cast<size_t>(len) + 8);
+    wrapped.reserve(len + 8);
     wrapped += "d4:info";
-    wrapped.append(buf, static_cast<size_t>(len));
+    wrapped.append(buf, len);
+    wrapped += 'e';
+    lt::error_code ec2;
+    auto atp2 = lt::load_torrent_buffer(
+        lt::span<char const>(wrapped.data(), static_cast<std::ptrdiff_t>(wrapped.size())),
+        ec2, limits);
+    if (!ec2 && atp2.ti) {
+        ec.clear();
+        out = std::move(atp2);
+        return true;
+    }
+    return false;
+#else
+    auto ti = std::make_shared<lt::torrent_info>(buf, static_cast<int>(len), ec);
+    if (!ec && ti) {
+        out.ti = ti;
+        out.info_hashes = ti->info_hashes();
+        out.name = ti->name();
+        for (auto const& tracker : ti->trackers()) {
+            out.trackers.push_back(tracker.url);
+        }
+        return true;
+    }
+    std::string wrapped;
+    wrapped.reserve(len + 8);
+    wrapped += "d4:info";
+    wrapped.append(buf, len);
     wrapped += 'e';
     lt::error_code ec2;
     auto ti2 = std::make_shared<lt::torrent_info>(
         wrapped.data(), static_cast<int>(wrapped.size()), ec2);
-    if (!ec2) { ec.clear(); return ti2; }
-    return nullptr;
+    if (!ec2 && ti2) {
+        ec.clear();
+        out.ti = ti2;
+        out.info_hashes = ti2->info_hashes();
+        out.name = ti2->name();
+        return true;
+    }
+    return false;
+#endif
 }
 
 lt_torrent lt_session_add_torrent(
@@ -698,7 +766,6 @@ lt_torrent lt_session_add_torrent(
         if (!slot) { set_err(LT_ERR_NOT_FOUND, "session not found"); return 0; }
 
         lt::add_torrent_params atp;
-        atp.save_path = save_path ? save_path : ".";
 
         if (info_bytes && info_len > 0) {
             if (info_len > (64u << 20)) {
@@ -706,9 +773,11 @@ lt_torrent lt_session_add_torrent(
                 return 0;
             }
             lt::error_code ec;
-            atp.ti = parse_torrent_or_info(
-                reinterpret_cast<char const*>(info_bytes), static_cast<int>(info_len), ec);
-            if (ec || !atp.ti) { set_err_ec(LT_ERR_PARSE, ec); return 0; }
+            if (!load_torrent_or_info(
+                    reinterpret_cast<char const*>(info_bytes), info_len, atp, ec) || !atp.ti) {
+                set_err_ec(LT_ERR_PARSE, ec);
+                return 0;
+            }
             if (!atp.ti->info_hashes().has_v1()) {
                 set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only torrents are not supported");
                 return 0;
@@ -741,9 +810,15 @@ lt_torrent lt_session_add_torrent(
             return 0;
         }
 
+        // Assigned after load_torrent_or_info / parse_magnet_uri so neither
+        // helper can reset save_path back to empty.
+        atp.save_path = (save_path && *save_path) ? save_path : ".";
+
         if (trackers_csv && *trackers_csv) {
             for (auto& t : split_csv(trackers_csv)) {
-                atp.trackers.push_back(t);
+                if (std::find(atp.trackers.begin(), atp.trackers.end(), t) == atp.trackers.end()) {
+                    atp.trackers.push_back(std::move(t));
+                }
             }
         }
 
@@ -897,7 +972,7 @@ size_t lt_torrent_file_path(lt_torrent tid, int idx, char* buf, size_t cap) {
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return 0; }
         auto ti = h.torrent_file();
         if (!ti) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return 0; }
-        auto const& fs = ti->files();
+        auto const& fs = torrent_files(*ti);
         if (idx < 0 || idx >= fs.num_files()) { set_err(LT_ERR_INVALID, "file index out of range"); return 0; }
         std::string p = fs.file_path(lt::file_index_t{idx});
         return copy_string(p, buf, cap);
@@ -913,7 +988,7 @@ int64_t lt_torrent_file_size(lt_torrent tid, int idx) {
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
         auto ti = h.torrent_file();
         if (!ti) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return -1; }
-        auto const& fs = ti->files();
+        auto const& fs = torrent_files(*ti);
         if (idx < 0 || idx >= fs.num_files()) { set_err(LT_ERR_INVALID, "file index out of range"); return -1; }
         return fs.file_size(lt::file_index_t{idx});
     } catch (std::exception const& e) {
@@ -928,7 +1003,7 @@ int64_t lt_torrent_file_offset(lt_torrent tid, int idx) {
         if (!h.is_valid()) { set_err(LT_ERR_NOT_FOUND, "torrent not found"); return -1; }
         auto ti = h.torrent_file();
         if (!ti) { set_err(LT_ERR_NOT_FOUND, "no metadata yet"); return -1; }
-        auto const& fs = ti->files();
+        auto const& fs = torrent_files(*ti);
         if (idx < 0 || idx >= fs.num_files()) { set_err(LT_ERR_INVALID, "file index out of range"); return -1; }
         return fs.file_offset(lt::file_index_t{idx});
     } catch (std::exception const& e) {
@@ -1095,14 +1170,20 @@ int lt_torrent_we_dont_have(lt_torrent tid, int piece_idx, int prio) {
 #ifdef TSL_HAVE_LT_INTERNALS
     auto tor = h.native_handle();
     if (!tor) return set_err(LT_ERR_NOT_FOUND, "no native handle");
-    h.reset_piece_deadline(lt::piece_index_t{piece_idx});
     lt::io_context& ioc = tor->session().get_context();
-    std::weak_ptr<typename decltype(tor)::element_type> wtor = tor;
-    lt::post(ioc, [wtor, piece_idx, prio]() {
-        auto t = wtor.lock();
+    // Transfer ownership of `tor` into the network-thread handler (matching
+    // libtorrent 2.1.3 PR #8989's release_torrent / async_call discipline) so
+    // ~aux::torrent() can NEVER execute on the caller Go thread if a concurrent
+    // remove_torrent drops the session's reference mid-call. Also fold
+    // reset_piece_deadline into the same post for atomic ordering and one fewer
+    // io_context hop.
+    lt::post(ioc, [t = std::move(tor), piece_idx, prio]() {
         if (!t || t->is_aborted() || !t->valid_metadata()) return;
         if (piece_idx < 0 || piece_idx >= t->torrent_file().num_pieces()) return;
         lt::piece_index_t const pi{piece_idx};
+#ifndef TORRENT_DISABLE_STREAMING
+        t->reset_piece_deadline(pi);
+#endif
         if (!t->has_picker()) t->need_picker();
         t->set_piece_priority(pi, lt::dont_download);
         t->picker().we_dont_have(pi);
@@ -1246,7 +1327,8 @@ char* lt_session_pop_alerts_json_alloc(lt_session sid, size_t* out_len) {
 
 static char* parse_atp_to_json(lt::add_torrent_params const& atp, size_t* out_len) {
     json j;
-    j["info_hash"] = sha1_hex(atp.info_hashes.v1);
+    auto const hashes = atp.ti ? atp.ti->info_hashes() : atp.info_hashes;
+    j["info_hash"] = sha1_hex(hashes.v1);
     j["display_name"] = atp.name;
     json tr = json::array();
     for (auto const& t : atp.trackers) tr.push_back(t);
@@ -1260,7 +1342,7 @@ static char* parse_atp_to_json(lt::add_torrent_params const& atp, size_t* out_le
         j["piece_length"]  = atp.ti->piece_length();
         j["total_size"]    = atp.ti->total_size();
         j["private"]       = atp.ti->priv();
-        auto const& fs = atp.ti->files();
+        auto const& fs = torrent_files(*atp.ti);
         json files = json::array();
         for (int i = 0; i < fs.num_files(); ++i) {
             lt::file_index_t const fi{i};
@@ -1308,20 +1390,15 @@ char* lt_parse_torrent_bytes_alloc(const uint8_t* buf, size_t len, size_t* out_l
     try {
         if (!buf || len == 0) { set_err(LT_ERR_INVALID, "empty bytes"); return nullptr; }
         if (len > (64u << 20)) { set_err(LT_ERR_INVALID, "torrent file exceeds 64 MiB"); return nullptr; }
+        lt::add_torrent_params atp;
         lt::error_code ec;
-        auto ti = parse_torrent_or_info(
-            reinterpret_cast<char const*>(buf), static_cast<int>(len), ec);
-        if (ec || !ti) { set_err_ec(LT_ERR_PARSE, ec); return nullptr; }
-        if (!ti->info_hashes().has_v1()) {
-            set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only torrents are not supported");
+        if (!load_torrent_or_info(reinterpret_cast<char const*>(buf), len, atp, ec) || !atp.ti) {
+            set_err_ec(LT_ERR_PARSE, ec);
             return nullptr;
         }
-        lt::add_torrent_params atp;
-        atp.ti = ti;
-        atp.info_hashes = ti->info_hashes();
-        atp.name = ti->name();
-        for (auto const& tracker : ti->trackers()) {
-            atp.trackers.push_back(tracker.url);
+        if (!atp.ti->info_hashes().has_v1()) {
+            set_err(LT_ERR_NOT_IMPL, "BitTorrent v2-only torrents are not supported");
+            return nullptr;
         }
         return parse_atp_to_json(atp, out_len);
     } catch (std::exception const& e) {

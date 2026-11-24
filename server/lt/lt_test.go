@@ -33,6 +33,7 @@ func newSession(t *testing.T) *Session {
 		"enable_lsd":               false,
 		"enable_natpmp":            false,
 		"enable_upnp":              false,
+		"announce_to_all_tiers":    false,
 		"announce_to_all_trackers": false,
 		// Random ephemeral port — otherwise on Windows multiple tests
 		// in series can race on libtorrent's default 6881 binding /
@@ -57,6 +58,7 @@ func TestVersion_NonEmpty(t *testing.T) {
 	if !strings.HasPrefix(v, "2.") {
 		t.Fatalf("expected libtorrent 2.x, got %q", v)
 	}
+	t.Logf("libtorrent engine version: %s", v)
 }
 
 func TestShimVersion_NonEmpty(t *testing.T) {
@@ -675,6 +677,100 @@ func TestLastError_AfterFailedParse(t *testing.T) {
 	}
 }
 
+func TestSettings_AnnounceFlagsIndependent(t *testing.T) {
+	s := newSession(t)
+	if err := s.ApplySettings(SessionConfig{
+		"announce_to_all_tiers":    true,
+		"announce_to_all_trackers": false,
+	}); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+	tiers, err := s.SettingBool("announce_to_all_tiers")
+	if err != nil {
+		t.Fatalf("SettingBool(announce_to_all_tiers): %v", err)
+	}
+	trackers, err := s.SettingBool("announce_to_all_trackers")
+	if err != nil {
+		t.Fatalf("SettingBool(announce_to_all_trackers): %v", err)
+	}
+	if !tiers || trackers {
+		t.Fatalf("announce flags mismatch: tiers=%v trackers=%v, want true/false", tiers, trackers)
+	}
+	if _, err := s.SettingBool("connections_limit"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("SettingBool on int setting: got %v, want ErrInvalid", err)
+	}
+	if _, err := s.SettingBool("nope_not_a_setting"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SettingBool on unknown setting: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestParseTorrentBytes_FullMetainfoAndBareInfo(t *testing.T) {
+	pieces := strings.Repeat("\x00", 20)
+	full := []byte("d8:announce26:http://tracker.example/ann13:announce-listll26:http://tracker.example/annel27:http://tracker2.example/annee4:infod6:lengthi100e4:name4:test12:piece lengthi16384e6:pieces20:" + pieces + "ee")
+	pt, err := ParseTorrentBytes(full)
+	if err != nil {
+		t.Fatalf("ParseTorrentBytes(full): %v", err)
+	}
+	if !pt.HasMetadata || pt.DisplayName != "test" || pt.TotalSize != 100 {
+		t.Fatalf("unexpected parsed metadata: %+v", pt)
+	}
+	if len(pt.Trackers) != 2 {
+		t.Fatalf("expected 2 trackers from load_torrent_buffer, got %v", pt.Trackers)
+	}
+
+	s := newSession(t)
+	tor, err := s.AddTorrent(AddTorrentParams{
+		InfoBytes: full,
+		Trackers:  []string{"http://tracker.example/ann", "http://extra.example/ann"},
+		SavePath:  t.TempDir(),
+		Paused:    true,
+	})
+	if err != nil {
+		t.Fatalf("AddTorrent(full): %v", err)
+	}
+	infoDict, err := tor.Metadata()
+	if err != nil || len(infoDict) == 0 {
+		t.Fatalf("Metadata(): %v (len=%d)", err, len(infoDict))
+	}
+	// Bare info-dict round-trip (legacy DB format).
+	ptBare, err := ParseTorrentBytes(infoDict)
+	if err != nil {
+		t.Fatalf("ParseTorrentBytes(bare info-dict): %v", err)
+	}
+	if ptBare.InfoHash != pt.InfoHash {
+		t.Fatalf("bare info-dict hash=%q, want %q", ptBare.InfoHash, pt.InfoHash)
+	}
+}
+
+// TestWeDontHave_ConcurrentRemove stresses the PR #8989 invariant: concurrent
+// WeDontHave calls racing Remove must never destruct aux::torrent on a Go
+// thread or crash.
+func TestWeDontHave_ConcurrentRemove(t *testing.T) {
+	s := newSession(t)
+	for iter := 0; iter < 20; iter++ {
+		tor, err := s.AddTorrent(AddTorrentParams{
+			InfoBytes: minimalTorrent(),
+			SavePath:  t.TempDir(),
+			Paused:    false,
+		})
+		if err != nil {
+			t.Fatalf("iter %d AddTorrent: %v", iter, err)
+		}
+		var wg sync.WaitGroup
+		for g := 0; g < 4; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < 8; i++ {
+					_ = tor.WeDontHave(0, 7)
+				}
+			}()
+		}
+		_ = tor.Remove(false)
+		wg.Wait()
+	}
+}
+
 // ---------- benchmarks (sanity, not run in CI by default) ----------
 
 func BenchmarkStatusJSON(b *testing.B) {
@@ -694,7 +790,7 @@ var _ = []any{
 	(*Session)(nil), (*Torrent)(nil), (*Status)(nil), (*Alert)(nil),
 	(*ParsedTorrent)(nil), (*AddTorrentParams)(nil), (*File)(nil),
 	(*StorageCallbacks)(nil),
-	Version, ShimVersion, NewSession, ParseMagnet, ParseTorrentBytes,
+	Version, ShimVersion, LastErrorMessage, NewSession, ParseMagnet, ParseTorrentBytes,
 	ParseTorrentFile, RegisterStorageCallbacks,
 	fmt.Sprintf, // shut linter up about unused imports if any
 }
