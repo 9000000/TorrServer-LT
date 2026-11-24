@@ -2,7 +2,9 @@ package torrstor
 
 import (
 	"bytes"
+	"context"
 	"testing"
+	"time"
 
 	"server/lt"
 )
@@ -160,5 +162,37 @@ func TestStorage_InstallUninstall(t *testing.T) {
 	}
 	if err := sess.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestStorage_WaitForCache(t *testing.T) {
+	s := NewStorage()
+	h := mkHash(0xEE)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan *Cache, 1)
+	go func() {
+		done <- s.WaitForCache(ctx, h)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	s.callbackOpen(42, h, 8, pieceLen)
+
+	select {
+	case c := <-done:
+		if c == nil || c.StorageID != 42 {
+			t.Fatalf("WaitForCache returned %v, want storage 42", c)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForCache did not wake after callbackOpen")
+	}
+
+	// Cancelled context returns nil promptly when cache never opens.
+	cctx, ccancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer ccancel()
+	if got := s.WaitForCache(cctx, mkHash(0xFF)); got != nil {
+		t.Fatalf("expected nil on timeout, got %v", got)
 	}
 }

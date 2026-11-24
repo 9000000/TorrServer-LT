@@ -1,6 +1,9 @@
 package lt
 
 import (
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -658,6 +661,112 @@ func TestStorage_CallbackTriggeredByAddTorrent(t *testing.T) {
 	}
 	if openedH == ([20]byte{}) {
 		t.Error("Open info hash is zero")
+	}
+}
+
+// minimalHybridTorrent returns a valid BitTorrent v1+v2 hybrid .torrent with a
+// single 100-byte file and its expected v1 SHA-1 info-hash. Its v2 SHA-256
+// hash differs from v1, so it reproduces the libtorrent construct_storage()
+// get_best() mismatch where p.info_hash carries truncated v2 instead of v1.
+func minimalHybridTorrent() ([]byte, [20]byte) {
+	payload := make([]byte, 100)
+	v1Piece := sha1.Sum(payload)
+	v2Root := sha256.Sum256(payload)
+	// Keys in bencoded dicts MUST be sorted lexicographically:
+	//   file tree, length, meta version, name, piece length, pieces
+	infoDict := "d" +
+		"9:file treed4:testd0:d6:lengthi100e11:pieces root32:" + string(v2Root[:]) + "eee" +
+		"6:lengthi100e" +
+		"12:meta versioni2e" +
+		"4:name4:test" +
+		"12:piece lengthi16384e" +
+		"6:pieces20:" + string(v1Piece[:]) +
+		"e"
+	v1Hash := sha1.Sum([]byte(infoDict))
+	full := []byte("d4:info" + infoDict + "e")
+	return full, v1Hash
+}
+
+// TestStorage_HybridTorrentOpensWithV1Hash verifies that a hybrid (v1+v2)
+// torrent opens custom disk_io storage under its v1 SHA-1 info-hash — NOT the
+// truncated v2 SHA-256 hash that libtorrent puts in storage_params::info_hash.
+// Without this fix, CacheByHash(v1) returns nil, Preload exits early (0 MB
+// downloaded despite connected seeds/peers), and Stream fails with
+// "no reader (cache not yet open)".
+func TestStorage_HybridTorrentOpensWithV1Hash(t *testing.T) {
+	hybridBytes, wantV1 := minimalHybridTorrent()
+
+	pt, err := ParseTorrentBytes(hybridBytes)
+	if err != nil {
+		t.Fatalf("ParseTorrentBytes(hybrid): %v", err)
+	}
+	if pt.InfoHash != hex.EncodeToString(wantV1[:]) {
+		t.Fatalf("parsed v1 hash = %s, want %x", pt.InfoHash, wantV1)
+	}
+
+	var (
+		mu       sync.Mutex
+		openedID int64
+		openedH  [20]byte
+	)
+	cb := StorageCallbacks{
+		Open: func(sid int64, h [20]byte, _ int, _ int64) {
+			mu.Lock()
+			openedID, openedH = sid, h
+			mu.Unlock()
+		},
+		Close:   func(int64) {},
+		Deleted: func(int64) {},
+		Read:    func(_ int64, _ int, _ int64, _ []byte) (int, error) { return 0, nil },
+		Write:   func(_ int64, _ int, _ int64, src []byte) (int, error) { return len(src), nil },
+		Have:    func(int64, int) bool { return false },
+	}
+	if err := RegisterStorageCallbacks(cb); err != nil {
+		t.Fatalf("RegisterStorageCallbacks: %v", err)
+	}
+	t.Cleanup(func() { _ = RegisterStorageCallbacks(StorageCallbacks{}) })
+
+	s, err := NewSession(SessionConfig{
+		"enable_dht": false, "enable_lsd": false,
+		"enable_natpmp": false, "enable_upnp": false,
+		"listen_interfaces": "0.0.0.0:0",
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	tor, err := s.AddTorrent(AddTorrentParams{
+		InfoBytes:           hybridBytes,
+		SavePath:            t.TempDir(),
+		Paused:              false,
+		DefaultDontDownload: true,
+	})
+	if err != nil {
+		t.Fatalf("AddTorrent(hybrid): %v", err)
+	}
+	if got := tor.InfoHash(); got != hex.EncodeToString(wantV1[:]) {
+		t.Fatalf("torrent InfoHash = %s, want %x", got, wantV1)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := openedID
+		mu.Unlock()
+		if got != 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if openedID == 0 {
+		t.Fatal("Open callback never fired for hybrid torrent")
+	}
+	if openedH != wantV1 {
+		t.Fatalf("Open callback received hash %x (likely truncated v2!), want v1 %x", openedH, wantV1)
 	}
 }
 

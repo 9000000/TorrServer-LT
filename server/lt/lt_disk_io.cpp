@@ -27,6 +27,15 @@
 #include <libtorrent/storage_defs.hpp>
 #include <libtorrent/units.hpp>
 #include <libtorrent/version.hpp>
+#if LIBTORRENT_VERSION_NUM >= 20103
+#include <libtorrent/torrent_info.hpp>
+#elif defined(TSL_HAVE_LT_INTERNALS)
+#if LIBTORRENT_VERSION_NUM >= 20100
+#include <libtorrent/aux_/torrent.hpp>
+#else
+#include <libtorrent/torrent.hpp>
+#endif
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -222,16 +231,42 @@ public:
 #endif
         int const num_pieces = ss.files->num_pieces();
         int const piece_length = ss.files->piece_length();
+        // libtorrent's torrent::construct_storage() populates p.info_hash with
+        // m_info_hash.get_best(), which for hybrid (v1+v2) torrents is the
+        // truncated v2 SHA-256 hash — NOT the v1 SHA-1 hash that the shim and
+        // Go torrstor.CacheByHash() use everywhere. Recover the true v1 SHA-1
+        // hash from `owner` (torrent_info on >= 2.1.3, aux::torrent on older
+        // builds) so hybrid torrents open their Cache under the exact v1 key.
+        lt::sha1_hash open_hash = p.info_hash;
+#if LIBTORRENT_VERSION_NUM >= 20103
+        if (owner && p.v1 && p.v2) {
+            auto const* ti = static_cast<lt::torrent_info const*>(owner.get());
+            if (ti->info_hashes().has_v1()) {
+                open_hash = ti->info_hashes().v1;
+            }
+        }
+#elif defined(TSL_HAVE_LT_INTERNALS)
+        if (owner && p.v1 && p.v2) {
+#if LIBTORRENT_VERSION_NUM >= 20100
+            auto const* tor = static_cast<lt::aux::torrent const*>(owner.get());
+#else
+            auto const* tor = static_cast<lt::torrent const*>(owner.get());
+#endif
+            if (tor->info_hash().has_v1()) {
+                open_hash = tor->info_hash().v1;
+            }
+        }
+#endif
         ss.num_pieces = num_pieces;
         ss.piece_length = piece_length;
-        ss.info_hash = p.info_hash;
+        ss.info_hash = open_hash;
 
         {
             std::unique_lock<std::shared_mutex> lk(map_mu_);
             storages_.emplace(idx, std::move(ss));
         }
 
-        auto raw = sha1_raw_from(p.info_hash);
+        auto raw = sha1_raw_from(open_hash);
         cb_.open(idx, reinterpret_cast<uint8_t const*>(raw.data()),
                  num_pieces, piece_length);
 

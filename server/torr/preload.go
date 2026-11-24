@@ -114,7 +114,7 @@ func (t *Torrent) Preload(ctx context.Context, index int, size int64, probe bool
 		return
 	}
 
-	cache := torrstor.Global().CacheByHash([20]byte(t.Hash()))
+	cache := t.waitCache(ctx)
 	if cache == nil || cache.PieceLength <= 0 {
 		return
 	}

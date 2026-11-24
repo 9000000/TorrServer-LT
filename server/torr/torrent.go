@@ -1,6 +1,7 @@
 package torr
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"regexp"
@@ -981,6 +982,44 @@ func (t *Torrent) NewReader(file *File) Reader {
 	return t.NewReaderGroup(file, "")
 }
 
+// waitCache returns this torrent's torrstor.Cache, waiting briefly when
+// libtorrent has just received magnet metadata and construct_storage() ->
+// cb_.open() is still finishing on the network thread.
+func (t *Torrent) waitCache(ctx context.Context) *torrstor.Cache {
+	if t == nil {
+		return nil
+	}
+	h := [20]byte(t.Hash())
+	if c := torrstor.Global().CacheByHash(h); c != nil {
+		return c
+	}
+	lh := t.handle()
+	if lh == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if t.closeCh != nil {
+		go func() {
+			select {
+			case <-t.closeCh:
+				cancel()
+			case <-wctx.Done():
+			}
+		}()
+	}
+	c := torrstor.Global().WaitForCache(wctx, h)
+	if c != nil {
+		if ts := lh.TotalSize(); ts > 0 {
+			c.SetTotalSize(ts)
+		}
+	}
+	return c
+}
+
 // NewReaderGroup is NewReader with an explicit device/session key (the client IP)
 // so concurrent streams of the same torrent from different devices each get their
 // own isolated sliding window in the cache. The streaming HTTP path passes the
@@ -990,7 +1029,7 @@ func (t *Torrent) NewReaderGroup(file *File, group string) Reader {
 	if t == nil || t.handle() == nil || file == nil {
 		return nil
 	}
-	cache := torrstor.Global().CacheByHash([20]byte(t.Hash()))
+	cache := t.waitCache(context.Background())
 	if cache == nil {
 		log.TLogln("torr.NewReader: no cache for", t.Hash().HexString())
 		return nil

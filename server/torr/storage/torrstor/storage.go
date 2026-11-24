@@ -9,6 +9,7 @@
 package torrstor
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -20,16 +21,18 @@ import (
 // into libtorrent via Install(); calls from libtorrent's disk threads
 // land on its Read/Write/Open/Close/Deleted/Have methods.
 type Storage struct {
-	mu     sync.RWMutex
-	caches map[int64]*Cache    // by libtorrent storage_id
-	byHash map[[20]byte]*Cache // by info hash for Reader lookup from torr
+	mu      sync.RWMutex
+	caches  map[int64]*Cache           // by libtorrent storage_id
+	byHash  map[[20]byte]*Cache        // by info hash for Reader lookup from torr
+	waiters map[[20]byte]chan struct{} // closed when callbackOpen registers a hash
 }
 
 // NewStorage constructs an empty registry.
 func NewStorage() *Storage {
 	return &Storage{
-		caches: map[int64]*Cache{},
-		byHash: map[[20]byte]*Cache{},
+		caches:  map[int64]*Cache{},
+		byHash:  map[[20]byte]*Cache{},
+		waiters: map[[20]byte]chan struct{}{},
 	}
 }
 
@@ -71,6 +74,44 @@ func (s *Storage) CacheByHash(hash [20]byte) *Cache {
 	return s.byHash[hash]
 }
 
+// WaitForCache returns the live Cache for hash if already registered, or blocks
+// until callbackOpen opens it or ctx is cancelled. Bridges the narrow magnet
+// race where libtorrent emits metadata_received_alert right before init()
+// invokes construct_storage() -> cb_.open().
+func (s *Storage) WaitForCache(ctx context.Context, hash [20]byte) *Cache {
+	for {
+		s.mu.RLock()
+		c := s.byHash[hash]
+		s.mu.RUnlock()
+		if c != nil {
+			return c
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return nil
+		}
+		s.mu.Lock()
+		if c = s.byHash[hash]; c != nil {
+			s.mu.Unlock()
+			return c
+		}
+		ch, ok := s.waiters[hash]
+		if !ok {
+			ch = make(chan struct{})
+			s.waiters[hash] = ch
+		}
+		s.mu.Unlock()
+		if ctx == nil {
+			<-ch
+			continue
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
 // ----- lt.StorageCallbacks dispatch -----
 
 func (s *Storage) callbackOpen(storage int64, hash [20]byte, numPieces int, pieceLength int64) {
@@ -78,6 +119,10 @@ func (s *Storage) callbackOpen(storage int64, hash [20]byte, numPieces int, piec
 	s.mu.Lock()
 	s.caches[storage] = c
 	s.byHash[hash] = c
+	if ch, ok := s.waiters[hash]; ok {
+		close(ch)
+		delete(s.waiters, hash)
+	}
 	s.mu.Unlock()
 	// In UseDisk mode, eagerly materialise any pre-existing piece
 	// files so Have()/Reader hit them without going through the lazy
