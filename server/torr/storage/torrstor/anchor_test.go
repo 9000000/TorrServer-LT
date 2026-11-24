@@ -312,3 +312,41 @@ func TestStreamAnchor_DyingConnectionCannotStealAnchorBack(t *testing.T) {
 		t.Fatalf("fresh seek-back: anchor %d, want 300 at once", got)
 	}
 }
+
+// TestStreamAnchor_ParkedOffsetZeroReaderKeepsWindow verifies that a real reader
+// parked in Read() at offset 0 (before the first block arrives, so winFirst == -1)
+// is NOT misclassified as a ServeContent Seek probe once waitFocusLingerMs expires.
+// Misclassifying it collapsed anchors to empty after 5s and zeroed pieces 1..aheadP.
+func TestStreamAnchor_ParkedOffsetZeroReaderKeepsWindow(t *testing.T) {
+	const MB = int64(1) << 20
+	plen := 4 * MB
+	prev := settings.BTsets()
+	settings.StoreBTsets(&settings.BTSets{UseDisk: false, CacheSize: 64 * MB, ReaderReadAHead: 95})
+	t.Cleanup(func() { settings.StoreBTsets(prev) })
+
+	s := NewStorage()
+	h := mkHash(0xF1)
+	const numPieces = 200
+	s.callbackOpen(1, h, numPieces, plen)
+	c := s.CacheByHash(h)
+	fileLen := int64(numPieces) * plen
+
+	// Pure ServeContent probe (not reading yet, offset 0, winFirst -1): must yield no anchor.
+	r := &Reader{cache: c, group: "dev", file: FileInfo{Offset: 0, Length: fileLen}}
+	r.winFirst.Store(-1)
+	r.offset.Store(0)
+	r.lastRead.Store(time.Now().Unix())
+	c.registerReader(r)
+	if anchors := c.groupPlayheads(); len(anchors) != 0 {
+		t.Fatalf("un-read offset-0 probe should yield no anchor, got %v", anchors)
+	}
+
+	// Once Read() parks at offset 0 (r.reading == true), even with no waitFocus
+	// (expired after 5s), the anchor must stay at piece 0 so the forward window
+	// keeps downloading.
+	r.reading.Store(true)
+	anchors := c.groupPlayheads()
+	if ph, ok := anchors["dev"]; !ok || ph != 0 {
+		t.Fatalf("parked offset-0 reader lost its anchor: got %v, want dev->0", anchors)
+	}
+}

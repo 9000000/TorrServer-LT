@@ -657,8 +657,11 @@ func (c *Cache) groupReaderSnaps() map[string][]readerSnap {
 		// Offset-0 probe (ServeContent's Seek(0,End)/Seek(0,Start) before the real
 		// seek): counting it would peg the anchor at the file head forever. Check
 		// file-local offset == 0 (not cur == 0) so episodes 2..N in multi-file
-		// torrents are classified properly too.
-		if r.winFirst.Load() < 0 && r.offset.Load() == 0 {
+		// torrents are classified properly too. A reader actively inside Read()
+		// (r.reading) is genuinely parked waiting on piece 0, not a Seek probe;
+		// keeping it eligible prevents the forward window from collapsing after
+		// waitFocusLingerMs (5s) on a slow initial piece.
+		if r.winFirst.Load() < 0 && r.offset.Load() == 0 && !r.reading.Load() {
 			s.isProbe = true
 		}
 		// EOF index re-read (AVI idx1 / MKV cues / MP4 moov): players open a SECOND
